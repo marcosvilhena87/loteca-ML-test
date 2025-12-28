@@ -5,14 +5,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts import process, train
 
 
-def test_train_outputs_model_files(tmp_path):
+def test_train_writes_metrics_file(tmp_path):
     raw_file = "data/raw/concursos_anteriores.csv"
     processed_file = tmp_path / "processed.csv"
-    model_file = tmp_path / "model.pkl"
-    scaler_file = tmp_path / "scaler.pkl"
+    metrics_file = tmp_path / "metrics.json"
 
     process(raw_file, processed_file)
-    train(processed_file, model_file, scaler_file)
+    train(processed_file, metrics_file)
 
-    assert model_file.exists()
-    assert scaler_file.exists()
+    assert metrics_file.exists()

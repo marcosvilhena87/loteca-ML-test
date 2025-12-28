@@ -1,22 +1,17 @@
 import logging
 import pandas as pd
 import numpy as np
-from joblib import load  # Para carregar os modelos previamente treinados
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
-def predict(input_file, model_file, scaler_file, output_file):
-    """Generate predictions for future games and write them to CSV.
+def predict(input_file, output_file):
+    """Generate baseline predictions for future games and write them to CSV.
 
     Parameters
     ----------
     input_file : str
         CSV file with upcoming games and odds or probabilities.
-    model_file : str
-        Path of the trained model to load.
-    scaler_file : str
-        Path of the scaler used during training.
     output_file : str
         Destination path for the predictions CSV.
 
@@ -26,15 +21,13 @@ def predict(input_file, model_file, scaler_file, output_file):
         The predictions are saved to ``output_file``.
     """
     try:
-        # Carregando os dados dos jogos futuros
         logging.info("Carregando dados dos jogos futuros...")
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
 
-        # Verificando se as colunas de probabilidades estão presentes
         required_prob_cols = ['P(1)', 'P(X)', 'P(2)']
+        odds_cols = ['Odds 1', 'Odds X', 'Odds 2']
+
         if not all(col in df.columns for col in required_prob_cols):
-            # Caso as colunas de probabilidade não existam, calculá-las a partir das odds
-            odds_cols = ['Odds 1', 'Odds X', 'Odds 2']
             if all(col in df.columns for col in odds_cols):
                 logging.info("Colunas de probabilidade ausentes. Calculando a partir das odds...")
                 df['P(1)'] = 1 / df['Odds 1']
@@ -50,69 +43,36 @@ def predict(input_file, model_file, scaler_file, output_file):
                     f"As colunas de odds {odds_cols} são necessárias para calcular as probabilidades no arquivo {input_file}."
                 )
 
-        # Reconfirmando que as colunas de probabilidade agora estão presentes
-        required_columns = ['P(1)', 'P(X)', 'P(2)']
-        
-        # Carregando o modelo e o scaler
-        logging.info("Carregando modelo e scaler...")
-        model = load(model_file)
-        scaler = load(scaler_file)
+        logging.info("Usando baseline (argmax das probabilidades implícitas) para gerar predições...")
+        prob_array = df[['P(1)', 'P(X)', 'P(2)']].to_numpy()
+        classes = np.array(['1', 'X', '2'])
 
-        # Selecionando as features para predição e escalando
-        logging.info("Preparando dados para predição...")
-        X_future = df[required_columns]
-        X_future_scaled = scaler.transform(X_future) if scaler is not None else X_future
+        df['Probabilidade (1)'] = np.round(prob_array[:, 0], 5)
+        df['Probabilidade (X)'] = np.round(prob_array[:, 1], 5)
+        df['Probabilidade (2)'] = np.round(prob_array[:, 2], 5)
+        df['Seco'] = classes[prob_array.argmax(axis=1)]
 
-        # Gerando as predições
-        logging.info("Gerando predições...")
-        probabilities = model.predict_proba(X_future_scaled)
-        predictions = model.predict(X_future_scaled)
-
-        # Garantindo mapeamento correto das classes
-        classes = model.classes_
-        class_to_index = {cls: idx for idx, cls in enumerate(classes)}
-
-        expected_labels = ['1', 'X', '2']
-        missing_labels = [label for label in expected_labels if label not in class_to_index]
-        if missing_labels:
-            raise ValueError(
-                f"As classes esperadas {missing_labels} não estão presentes no modelo treinado. Classes encontradas: {classes}."
-            )
-
-        # Adicionando as predições ao DataFrame
-        logging.info("Adicionando predições ao DataFrame...")
-        df['Probabilidade (1)'] = np.round(probabilities[:, class_to_index['1']], 5)
-        df['Probabilidade (X)'] = np.round(probabilities[:, class_to_index['X']], 5)
-        df['Probabilidade (2)'] = np.round(probabilities[:, class_to_index['2']], 5)
-        df['Secos'] = predictions
-
-        # Adicionando um valor pequeno para evitar problemas com log(0)
         epsilon = 1e-10
-        adjusted_probabilities = probabilities + epsilon
+        adjusted_probabilities = prob_array + epsilon
 
-        # Calculando a entropia com as probabilidades ajustadas
         logging.info("Calculando entropia para determinar os jogos mais incertos...")
         df['Entropia'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
 
-        # Identificar os 5 jogos mais incertos para aplicar os "duplos"
         jogos_duplos_idxs = df.nlargest(5, 'Entropia').index
         logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")
 
-        # Gerar a coluna "Aposta"
         logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
-        df['Aposta'] = df['Secos']  # Copia as apostas secas inicialmente
+        df['Aposta'] = df['Seco']
 
-        # Escolhendo os "duplos" para os 5 jogos mais incertos
         for idx in jogos_duplos_idxs:
-            mais_provaveis = probabilities[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
-            opcoes_duplas = [classes[mais_provaveis[0]], classes[mais_provaveis[1]]]
+            mais_provaveis = prob_array[idx].argsort()[-2:][::-1]
+            opcoes_duplas = classes[mais_provaveis]
             df.loc[idx, 'Aposta'] = ", ".join(opcoes_duplas)
 
-        # Salvando as predições no arquivo
         logging.info(f"Salvando predições no arquivo {output_file}...")
         df.to_csv(output_file, sep=';', index=False)
         logging.info(f"Previsões salvas com sucesso em {output_file}!")
-    
+
     except FileNotFoundError as e:
         logging.error(f"Erro: Arquivo não encontrado - {e}")
     except ValueError as e:

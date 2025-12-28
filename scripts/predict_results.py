@@ -46,11 +46,18 @@ def _compute_match_metrics(prob_array: np.ndarray) -> tuple[pd.Series, pd.Series
 def _choose_duplos(df: pd.DataFrame, prob_array: np.ndarray, classes: np.ndarray) -> list[int]:
     """Select the five best games for duplos using the custom score."""
 
-    p_max, gap, _ = _compute_match_metrics(prob_array)
+    p_max, gap, zebra = _compute_match_metrics(prob_array)
     df['p_max'] = p_max
     df['Gap'] = gap
-    df['Score Duplo'] = (1 - p_max) + (1 - gap)
-    top_duplos = df.nlargest(5, 'Score Duplo').index.tolist()
+    df['Zebra'] = zebra
+    gap_component = (1 - (gap / 0.25)).clip(0, 1)
+    df['Score Duplo'] = 0.75 * zebra + 0.25 * gap_component
+
+    ordered = df.sort_values(
+        by=['Score Duplo', 'Entropia', 'Zebra'],
+        ascending=False
+    )
+    top_duplos = ordered.head(5).index.tolist()
     logging.info(f"Índices selecionados para duplos pelo score personalizado: {top_duplos}")
     return top_duplos
 
@@ -64,7 +71,7 @@ def _build_duplo(prob_row: np.ndarray, classes: np.ndarray) -> str:
 
 
 def _choose_seco(prob_row: np.ndarray, p_max: float, gap: float, classes: np.ndarray,
-                 p_x: float, penalty: float = 0.35) -> str:
+                 p_x: float) -> str:
     """Apply heuristic rules to select a single outcome (seco)."""
 
     sorted_indices = prob_row.argsort()[::-1]
@@ -80,7 +87,8 @@ def _choose_seco(prob_row: np.ndarray, p_max: float, gap: float, classes: np.nda
 
     def add_candidate(idx: int):
         prob = prob_row[idx]
-        score = prob - penalty * p_max
+        penalty = 0.25 * p_max + 0.25 * gap
+        score = prob - penalty
         candidates.append((score, classes[idx]))
 
     if p_max >= 0.62:
@@ -118,7 +126,14 @@ def _limit_favoritos(df: pd.DataFrame, apostas: list[str], duplo_idxs: list[int]
     excesso = max(0, len(favoritos_idxs) - 6)
     if excesso > 0:
         logging.info(f"Reduzindo {excesso} favoritos travados para diversificar o volante.")
-        for idx in favoritos_idxs[-excesso:]:
+        candidatos_troca = (
+            df.loc[favoritos_idxs, ['Gap', 'p_max']]
+            .assign(idx=favoritos_idxs)
+            .sort_values(by=['Gap', 'p_max'])
+            .head(excesso)['idx']
+        )
+
+        for idx in candidatos_troca:
             sorted_indices = prob_array[idx].argsort()[::-1]
             alternativa = classes[sorted_indices[1]]
             apostas[idx] = alternativa
@@ -136,9 +151,14 @@ def _garantir_empates(df: pd.DataFrame, apostas: list[str], duplo_idxs: list[int
     if empates_atual >= minimo:
         return apostas
 
+    candidatos = df.assign(idx=df.index)
+    candidatos['top2'] = [
+        'X' in classes[prob_array[int(i)].argsort()[-2:]]
+        for i in candidatos['idx']
+    ]
     candidatos = (
-        df.assign(idx=df.index)
-        .query("`P(X)` >= 0.28")
+        candidatos
+        .query("`P(X)` >= 0.28 and top2 == True")
         .sort_values('P(X)', ascending=False)
     )
 
@@ -149,14 +169,68 @@ def _garantir_empates(df: pd.DataFrame, apostas: list[str], duplo_idxs: list[int
 
         if idx in duplo_idxs:
             apostas[idx] = _build_duplo(prob_array[idx], classes)
-            if 'X' not in apostas[idx]:
-                apostas[idx] = f"X, {apostas[idx].split(', ')[0]}"
         else:
+            sorted_indices = prob_array[idx].argsort()[::-1]
+            if classes[sorted_indices[1]] != 'X':
+                continue
             apostas[idx] = 'X'
 
         empates_atual += 1
         if empates_atual >= minimo:
             break
+
+    if empates_atual < minimo:
+        fallback = (
+            df.assign(idx=df.index)
+            .sort_values('P(X)', ascending=False)
+        )
+        for _, row in fallback.iterrows():
+            idx = int(row['idx'])
+            if idx in duplo_idxs or tem_x(apostas[idx]):
+                continue
+
+            sorted_indices = prob_array[idx].argsort()[::-1]
+            if classes[sorted_indices[1]] != 'X':
+                continue
+
+            apostas[idx] = 'X'
+            empates_atual += 1
+
+            if empates_atual >= minimo:
+                break
+
+    return apostas
+
+
+def _aplicar_diferencial_controlado(df: pd.DataFrame, apostas: list[str], duplo_idxs: list[int],
+                                    prob_array: np.ndarray, classes: np.ndarray,
+                                    max_viradas: int = 2) -> list[str]:
+    """Aplica 1-2 viradas em jogos equilibrados para evitar pulverização."""
+
+    def pode_virar(idx: int) -> bool:
+        return (
+            0.52 <= df.loc[idx, 'p_max'] <= 0.62
+            and df.loc[idx, 'Gap'] <= 0.10
+            and idx not in duplo_idxs
+        )
+
+    candidatos = [idx for idx in range(len(df)) if pode_virar(idx)]
+    candidatos.sort(key=lambda i: (-df.loc[i, 'Zebra'], -df.loc[i, 'Entropia']))
+
+    viradas_feitas = 0
+    for idx in candidatos:
+        if viradas_feitas >= max_viradas:
+            break
+
+        prob_row = prob_array[idx]
+        sorted_indices = prob_row.argsort()[::-1]
+        top1, top2 = sorted_indices[:2]
+        if apostas[idx] != classes[top1]:
+            continue
+
+        if classes[top2] == 'X' or classes[top2] != classes[top1]:
+            apostas[idx] = classes[top2]
+            viradas_feitas += 1
 
     return apostas
 
@@ -205,6 +279,7 @@ def predict(input_file, output_file):
                 )
 
         apostas = _limit_favoritos(df, apostas, duplo_idxs, classes, prob_array)
+        apostas = _aplicar_diferencial_controlado(df, apostas, duplo_idxs, prob_array, classes)
         apostas = _garantir_empates(df, apostas, duplo_idxs, prob_array, classes)
 
         df['Aposta'] = apostas

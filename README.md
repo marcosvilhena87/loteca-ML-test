@@ -31,7 +31,10 @@ Execute the following from the repository root:
 python main.py
 ```
 
-The script processes the raw data, trains a `RandomForestClassifier` and writes predictions to `output/predictions.csv`.
+The script processes the raw data, trains a `RandomForestClassifier` (for evaluation only) and writes predictions to
+`output/predictions.csv`. The final bets are built directly from the bookmaker probabilities: the "seco" pick is the
+argmax of `P(1)`, `P(X)`, `P(2)`, and the five "duplos" are assigned to the matches with the highest entropy based on
+those same probabilities (using the two largest values in each case).
 
 ## Running individual steps
 

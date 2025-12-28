@@ -61,18 +61,29 @@ def predict(input_file, model_file, scaler_file, output_file):
         # Selecionando as features para predição e escalando
         logging.info("Preparando dados para predição...")
         X_future = df[required_columns]
-        X_future_scaled = scaler.transform(X_future)
+        X_future_scaled = scaler.transform(X_future) if scaler is not None else X_future
 
         # Gerando as predições
         logging.info("Gerando predições...")
         probabilities = model.predict_proba(X_future_scaled)
         predictions = model.predict(X_future_scaled)
 
+        # Garantindo mapeamento correto das classes
+        classes = model.classes_
+        class_to_index = {cls: idx for idx, cls in enumerate(classes)}
+
+        expected_labels = ['1', 'X', '2']
+        missing_labels = [label for label in expected_labels if label not in class_to_index]
+        if missing_labels:
+            raise ValueError(
+                f"As classes esperadas {missing_labels} não estão presentes no modelo treinado. Classes encontradas: {classes}."
+            )
+
         # Adicionando as predições ao DataFrame
         logging.info("Adicionando predições ao DataFrame...")
-        df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
-        df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
-        df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)        
+        df['Probabilidade (1)'] = np.round(probabilities[:, class_to_index['1']], 5)
+        df['Probabilidade (X)'] = np.round(probabilities[:, class_to_index['X']], 5)
+        df['Probabilidade (2)'] = np.round(probabilities[:, class_to_index['2']], 5)
         df['Secos'] = predictions
 
         # Adicionando um valor pequeno para evitar problemas com log(0)
@@ -92,10 +103,10 @@ def predict(input_file, model_file, scaler_file, output_file):
         df['Aposta'] = df['Secos']  # Copia as apostas secas inicialmente
 
         # Escolhendo os "duplos" para os 5 jogos mais incertos
-        duplo_opcoes = ['1', 'X', '2']
         for idx in jogos_duplos_idxs:
             mais_provaveis = probabilities[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
-            df.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"
+            opcoes_duplas = [classes[mais_provaveis[0]], classes[mais_provaveis[1]]]
+            df.loc[idx, 'Aposta'] = ", ".join(opcoes_duplas)
 
         # Salvando as predições no arquivo
         logging.info(f"Salvando predições no arquivo {output_file}...")

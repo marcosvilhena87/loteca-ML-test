@@ -59,6 +59,8 @@ def predict(input_file, model_file, output_file):
         if np.any(prob_sum == 0):
             raise ValueError("Probabilidades do bookmaker não podem somar 0.")
         normalized_probs = bookmaker_probs / prob_sum
+        if not np.all(np.isfinite(normalized_probs)):
+            raise ValueError("Probabilidades do bookmaker resultaram em valores não numéricos.")
 
         # Registrar as probabilidades usadas no output
         df['Probabilidade (1)'] = np.round(normalized_probs[:, 0], 5)
@@ -80,7 +82,22 @@ def predict(input_file, model_file, output_file):
 
         # Labels mais prováveis para cada jogo
         top2_indices = np.argsort(adjusted_probabilities, axis=1)[:, -2:][:, ::-1]
-        top2_labels = [[class_labels[i] for i in idxs] for idxs in top2_indices]
+        top2_labels = []
+        for idxs in top2_indices:
+            seen = set()
+            ordered_labels = []
+            for idx in idxs:
+                label = class_labels[idx]
+                if label not in seen:
+                    ordered_labels.append(label)
+                    seen.add(label)
+
+            if len(ordered_labels) < 2:
+                fallback_label = next(label for label in class_labels if label not in seen)
+                ordered_labels.append(fallback_label)
+
+            top2_labels.append(ordered_labels)
+
         df['Top2'] = [", ".join(labels) for labels in top2_labels]
 
         # Calculando o "gap" entre as duas maiores probabilidades
@@ -90,6 +107,8 @@ def predict(input_file, model_file, output_file):
         # Identificar os jogos mais incertos (menor gap, desempate por maior entropia)
         n_duplos = 5
         jogos_ordenados = df.sort_values(by=['Gap', 'Entropia'], ascending=[True, False])
+        rank_duplo = pd.Series(range(1, len(jogos_ordenados) + 1), index=jogos_ordenados.index)
+        df['RankDuplo'] = rank_duplo.reindex(df.index)
         jogos_duplos_idxs = jogos_ordenados.head(min(n_duplos, len(df))).index
         if len(df) < n_duplos:
             logging.warning(

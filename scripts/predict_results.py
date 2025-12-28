@@ -42,10 +42,13 @@ def predict(input_file, model_file, output_file):
                 df['P(1)'] /= prob_sum
                 df['P(X)'] /= prob_sum
                 df['P(2)'] /= prob_sum
+                logging.info("Probabilidades calculadas e normalizadas a partir das odds do bookmaker.")
             else:
                 raise ValueError(
                     f"As colunas de odds {odds_cols} são necessárias para calcular as probabilidades no arquivo {input_file}."
                 )
+        else:
+            logging.info("Probabilidades já presentes no arquivo. Usando valores fornecidos.")
 
         # Reconfirmando que as colunas de probabilidade agora estão presentes
         required_columns = ['P(1)', 'P(X)', 'P(2)']

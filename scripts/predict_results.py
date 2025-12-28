@@ -49,7 +49,7 @@ def predict(input_file, model_file, output_file):
 
         # Reconfirmando que as colunas de probabilidade agora estão presentes
         required_columns = ['P(1)', 'P(X)', 'P(2)']
-        
+
         # Utilizando diretamente as probabilidades do bookmaker para decisões
         logging.info("Usando as probabilidades do bookmaker para gerar apostas...")
         bookmaker_probs = df[required_columns].to_numpy(dtype=float)
@@ -78,9 +78,46 @@ def predict(input_file, model_file, output_file):
         logging.info("Calculando entropia (com base no bookmaker) para determinar os jogos mais incertos...")
         df['Entropia'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
 
-        # Identificar os 5 jogos mais incertos para aplicar os "duplos"
-        jogos_duplos_idxs = df.nlargest(5, 'Entropia').index
-        logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")
+        # Labels mais prováveis para cada jogo
+        top2_indices = np.argsort(adjusted_probabilities, axis=1)[:, -2:][:, ::-1]
+        top2_labels = [[class_labels[i] for i in idxs] for idxs in top2_indices]
+        df['Top2'] = [", ".join(labels) for labels in top2_labels]
+
+        # Calculando o "gap" entre as duas maiores probabilidades
+        prob_sorted = np.sort(adjusted_probabilities, axis=1)[:, ::-1]
+        df['Gap'] = prob_sorted[:, 0] - prob_sorted[:, 1]
+
+        # Identificar os jogos mais incertos (menor gap, desempate por maior entropia)
+        n_duplos = 5
+        jogos_ordenados = df.sort_values(by=['Gap', 'Entropia'], ascending=[True, False])
+        jogos_duplos_idxs = jogos_ordenados.head(min(n_duplos, len(df))).index
+        if len(df) < n_duplos:
+            logging.warning(
+                "Menos jogos do que o esperado. Aplicando duplos em todos: "
+                f"{len(df)} jogos disponíveis para {n_duplos} duplos."
+            )
+        else:
+            logging.info(f"Aplicando exatamente {n_duplos} duplos com base no gap.")
+
+        expected_games = 14
+        if len(df) != expected_games:
+            logging.warning(
+                f"Quantidade de jogos diferente do esperado ({expected_games}). Encontrados {len(df)} registros."
+            )
+        logging.info(
+            "Índices dos jogos selecionados para duplos (gap + entropia): "
+            f"{jogos_duplos_idxs.tolist()}"
+        )
+
+        if len(jogos_duplos_idxs) != n_duplos:
+            logging.warning(
+                f"Total de duplos gerados: {len(jogos_duplos_idxs)} (configurado: {n_duplos})."
+            )
+        logging.info(
+            "Distribuição planejada: %s secos e %s duplos.",
+            len(df) - len(jogos_duplos_idxs),
+            len(jogos_duplos_idxs)
+        )
 
         # Gerar a coluna "Aposta"
         logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
@@ -88,10 +125,7 @@ def predict(input_file, model_file, output_file):
 
         # Escolhendo os "duplos" para os 5 jogos mais incertos
         for idx in jogos_duplos_idxs:
-            row_probs = adjusted_probabilities[idx]
-            mais_provaveis_idxs = row_probs.argsort()[-2:][::-1]  # Duas maiores probabilidades
-            mais_provaveis_labels = [class_labels[i] for i in mais_provaveis_idxs]
-            df.loc[idx, 'Aposta'] = ", ".join(mais_provaveis_labels)
+            df.loc[idx, 'Aposta'] = df.loc[idx, 'Top2']
 
         # Salvando as predições no arquivo
         logging.info(f"Salvando predições no arquivo {output_file}...")

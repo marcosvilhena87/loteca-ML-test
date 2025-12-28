@@ -1,6 +1,7 @@
 import logging
 import pandas as pd
 import numpy as np
+import unicodedata
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -33,6 +34,106 @@ def _normalize_probabilities(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _normalize_text(value: str) -> str:
+    """Normalize textual fields for consistent merges."""
+
+    if pd.isna(value):
+        return ''
+
+    text = str(value).strip().upper()
+    text = unicodedata.normalize('NFKD', text)
+    text = ''.join(char for char in text if not unicodedata.combining(char))
+    return ' '.join(text.split())
+
+
+def _build_merge_key(df: pd.DataFrame, columns: list[str]) -> pd.Series | None:
+    """Create a normalized merge key when all columns are present."""
+
+    if not all(col in df.columns for col in columns):
+        return None
+
+    return df[columns].apply(lambda row: '||'.join(_normalize_text(v) for v in row), axis=1)
+
+
+def _merge_popularity(
+    df: pd.DataFrame, popularity_path: str = 'data/raw/popularidade.csv'
+) -> pd.DataFrame:
+    """Merge popularity data into the future games dataframe.
+
+    The merge tries a stable key (``Concurso`` + ``Jogo``) first and falls back to
+    ``Mandante`` + ``Visitante`` + ``Data``. When popularity data is missing, the
+    original dataframe is returned unchanged.
+    """
+
+    try:
+        popularity_df = pd.read_csv(popularity_path, delimiter=';', decimal='.')
+    except FileNotFoundError:
+        logging.warning(
+            "Arquivo de popularidade não encontrado em %s. Continuando sem popularidade.",
+            popularity_path,
+        )
+        return df
+    except Exception as exc:  # pragma: no cover - proteção defensiva de IO
+        logging.warning(
+            "Não foi possível carregar o arquivo de popularidade (%s): %s. Continuando sem popularidade.",
+            popularity_path,
+            exc,
+        )
+        return df
+
+    if popularity_df.empty:
+        logging.warning("Arquivo de popularidade vazio. Continuando sem popularidade.")
+        return df
+
+    pop_col_candidates = [
+        col for col in popularity_df.columns if _normalize_text(col).startswith('POPULARIDADE')
+    ]
+
+    if not pop_col_candidates:
+        logging.warning(
+            "Nenhuma coluna de popularidade encontrada no arquivo %s. Continuando sem popularidade.",
+            popularity_path,
+        )
+        return df
+
+    popularity_df = popularity_df.copy()
+    popularity_df['Popularidade'] = pd.to_numeric(
+        popularity_df[pop_col_candidates[0]], errors='coerce'
+    )
+
+    key_candidates = [
+        ['Concurso', 'Jogo'],
+        ['Mandante', 'Visitante', 'Data'],
+    ]
+
+    merge_key = None
+    for cols in key_candidates:
+        left_key = _build_merge_key(df, cols)
+        right_key = _build_merge_key(popularity_df, cols)
+        if left_key is not None and right_key is not None:
+            merge_key = cols
+            df = df.copy()
+            df['_merge_key'] = left_key
+            popularity_df = popularity_df.copy()
+            popularity_df['_merge_key'] = right_key
+            break
+
+    if merge_key is None:
+        logging.warning(
+            "Não foi possível encontrar colunas de chave comuns para fazer o merge de popularidade."
+        )
+        return df
+
+    popularity_df = popularity_df.drop_duplicates(subset=['_merge_key'])
+    merged = df.merge(
+        popularity_df[['_merge_key', 'Popularidade']],
+        on='_merge_key',
+        how='left',
+    )
+    merged = merged.drop(columns=['_merge_key'])
+    return merged
+
+
 def _normalize_popularity(df: pd.DataFrame) -> pd.Series:
     """Return a normalized popularity column in the 0-1 range.
 
@@ -40,11 +141,34 @@ def _normalize_popularity(df: pd.DataFrame) -> pd.Series:
     """
 
     if 'Popularidade' not in df.columns:
+        logging.warning(
+            "Popularidade ausente após o merge. Todas as partidas receberão valor 0."
+        )
         return pd.Series([0.0] * len(df), index=df.index, dtype=float)
 
     pop = pd.to_numeric(df['Popularidade'], errors='coerce').fillna(0)
     pop = pop.clip(lower=0, upper=100)
-    return pop / 100
+    normalized = pop / 100
+
+    cobertura = float((normalized > 0).mean()) if len(normalized) else 0.0
+    if (normalized > 0).any():
+        pop_stats = normalized[normalized > 0]
+        logging.info(
+            "Popularidade - cobertura: %.1f%% | min: %.2f | mediana: %.2f | max: %.2f",
+            cobertura * 100,
+            pop_stats.min(),
+            pop_stats.median(),
+            pop_stats.max(),
+        )
+    else:
+        logging.info("Popularidade - cobertura: 0.0%% | min: 0 | mediana: 0 | max: 0")
+
+    if cobertura < 0.70:
+        logging.warning(
+            "Cobertura de popularidade abaixo do limiar (70%%). Verifique o merge dos arquivos."
+        )
+
+    return normalized
 
 
 def _compute_match_metrics(prob_array: np.ndarray) -> tuple[pd.Series, pd.Series, pd.Series]:
@@ -99,7 +223,7 @@ def _choose_seco(prob_row: np.ndarray, p_max: float, gap: float, classes: np.nda
     top1, top2 = sorted_indices[:2]
 
     # Anti-mercado leve: evite consenso extremo quando a popularidade estiver alta.
-    if p_max >= 0.65 and popularidade >= 0.65:
+    if p_max >= 0.65 and popularidade >= 0.65 and gap <= 0.12:
         logging.debug(
             "Aplicando anti-mercado: p_max=%.3f, popularidade=%.3f -> virando para %s",
             p_max,
@@ -246,7 +370,17 @@ def _aplicar_diferencial_controlado(df: pd.DataFrame, apostas: list[str], duplo_
         )
 
     candidatos = [idx for idx in range(len(df)) if pode_virar(idx)]
-    candidatos.sort(key=lambda i: (-df.loc[i, 'Zebra'], -df.loc[i, 'Entropia']))
+    popularidade_series = df.get('Popularidade_normalizada')
+    if popularidade_series is None:
+        popularidade_series = pd.Series([0] * len(df), index=df.index)
+
+    candidatos.sort(
+        key=lambda i: (
+            -popularidade_series.loc[i],
+            -df.loc[i, 'Zebra'],
+            -df.loc[i, 'Entropia'],
+        )
+    )
 
     viradas_feitas = 0
     for idx in candidatos:
@@ -274,6 +408,9 @@ def predict(input_file, output_file):
 
         df = _normalize_probabilities(df)
         logging.info("Probabilidades carregadas e normalizadas.")
+
+        df = _merge_popularity(df)
+        logging.info("Popularidade mesclada aos jogos futuros.")
 
         popularidade = _normalize_popularity(df)
 

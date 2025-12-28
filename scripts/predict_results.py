@@ -6,7 +6,7 @@ from joblib import load  # Para carregar os modelos previamente treinados
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
-def predict(input_file, model_file, scaler_file, output_file):
+def predict(input_file, model_file, output_file):
     """Generate predictions for future games and write them to CSV.
 
     Parameters
@@ -15,8 +15,6 @@ def predict(input_file, model_file, scaler_file, output_file):
         CSV file with upcoming games and odds or probabilities.
     model_file : str
         Path of the trained model to load.
-    scaler_file : str
-        Path of the scaler used during training.
     output_file : str
         Destination path for the predictions CSV.
 
@@ -53,27 +51,35 @@ def predict(input_file, model_file, scaler_file, output_file):
         # Reconfirmando que as colunas de probabilidade agora estão presentes
         required_columns = ['P(1)', 'P(X)', 'P(2)']
         
-        # Carregando o modelo e o scaler
-        logging.info("Carregando modelo e scaler...")
+        # Carregando o modelo
+        logging.info("Carregando modelo...")
         model = load(model_file)
-        scaler = load(scaler_file)
 
-        # Selecionando as features para predição e escalando
+        # Selecionando as features para predição
         logging.info("Preparando dados para predição...")
         X_future = df[required_columns]
-        X_future_scaled = scaler.transform(X_future)
 
         # Gerando as predições
         logging.info("Gerando predições...")
-        probabilities = model.predict_proba(X_future_scaled)
-        predictions = model.predict(X_future_scaled)
+        probabilities = model.predict_proba(X_future)
+        predictions = model.predict(X_future)
+
+        # Garantindo mapeamento correto classe -> coluna
+        classes = model.classes_
+        class_indices = {label: idx for idx, label in enumerate(classes)}
+        try:
+            idx_1 = class_indices['1']
+            idx_X = class_indices['X']
+            idx_2 = class_indices['2']
+        except KeyError as missing:
+            raise ValueError(f"Classe esperada ausente no modelo: {missing}")
 
         # Adicionando as predições ao DataFrame
         logging.info("Adicionando predições ao DataFrame...")
-        df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
-        df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
-        df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)        
-        df['Secos'] = predictions
+        df['Probabilidade (1)'] = np.round(probabilities[:, idx_1], 5)
+        df['Probabilidade (X)'] = np.round(probabilities[:, idx_X], 5)
+        df['Probabilidade (2)'] = np.round(probabilities[:, idx_2], 5)
+        df['Seco'] = predictions
 
         # Adicionando um valor pequeno para evitar problemas com log(0)
         epsilon = 1e-10
@@ -89,13 +95,13 @@ def predict(input_file, model_file, scaler_file, output_file):
 
         # Gerar a coluna "Aposta"
         logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
-        df['Aposta'] = df['Secos']  # Copia as apostas secas inicialmente
+        df['Aposta'] = df['Seco']  # Copia as apostas secas inicialmente
 
         # Escolhendo os "duplos" para os 5 jogos mais incertos
-        duplo_opcoes = ['1', 'X', '2']
         for idx in jogos_duplos_idxs:
-            mais_provaveis = probabilities[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
-            df.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"
+            mais_provaveis_idxs = probabilities[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
+            mais_provaveis_labels = [classes[i] for i in mais_provaveis_idxs]
+            df.loc[idx, 'Aposta'] = ", ".join(mais_provaveis_labels)
 
         # Salvando as predições no arquivo
         logging.info(f"Salvando predições no arquivo {output_file}...")

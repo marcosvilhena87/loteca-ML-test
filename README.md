@@ -19,7 +19,7 @@ Run this command before executing the pipeline or running the tests.
 Place your CSV files in `data/raw/`:
 
 - `concursos_anteriores.csv` – historical games with columns such as `Mandante`, `Visitante`, outcome flags (`[1]`, `[x]`, `[2]`) and odds.
-- `proximo_concurso.csv` – upcoming games with the same odds columns.
+- `proximo_concurso.csv` – upcoming games with the same odds columns. You may optionally add a `Popularidade` column (0–100) to express how popular each resultado seco is with the betting public; the prediction heuristics will use it to penalize consensus favorites and to prioritize duplos onde o público está mais alinhado com o mercado.
 
 Running the pipeline will create `data/processed/loteca_treinamento.csv`, store baseline metrics in `models/` and save the picks in `output/`.
 

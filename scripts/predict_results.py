@@ -33,6 +33,20 @@ def _normalize_probabilities(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _normalize_popularity(df: pd.DataFrame) -> pd.Series:
+    """Return a normalized popularity column in the 0-1 range.
+
+    The pipeline keeps working when the column is absent by returning zeros.
+    """
+
+    if 'Popularidade' not in df.columns:
+        return pd.Series([0.0] * len(df), index=df.index, dtype=float)
+
+    pop = pd.to_numeric(df['Popularidade'], errors='coerce').fillna(0)
+    pop = pop.clip(lower=0, upper=100)
+    return pop / 100
+
+
 def _compute_match_metrics(prob_array: np.ndarray) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Return p_max, gap and zebra values for each match."""
 
@@ -43,7 +57,9 @@ def _compute_match_metrics(prob_array: np.ndarray) -> tuple[pd.Series, pd.Series
     return p_max, gap, zebra
 
 
-def _choose_duplos(df: pd.DataFrame, prob_array: np.ndarray, classes: np.ndarray) -> list[int]:
+def _choose_duplos(
+    df: pd.DataFrame, prob_array: np.ndarray, classes: np.ndarray, popularidade: pd.Series
+) -> list[int]:
     """Select the five best games for duplos using the custom score."""
 
     p_max, gap, zebra = _compute_match_metrics(prob_array)
@@ -51,7 +67,12 @@ def _choose_duplos(df: pd.DataFrame, prob_array: np.ndarray, classes: np.ndarray
     df['Gap'] = gap
     df['Zebra'] = zebra
     gap_component = (1 - (gap / 0.25)).clip(0, 1)
-    df['Score Duplo'] = 0.75 * zebra + 0.25 * gap_component
+    df['Popularidade_normalizada'] = popularidade
+    df['Score Duplo'] = (
+        0.55 * zebra
+        + 0.20 * gap_component
+        + 0.25 * df['Popularidade_normalizada']
+    )
 
     ordered = df.sort_values(
         by=['Score Duplo', 'Entropia', 'Zebra'],
@@ -71,11 +92,21 @@ def _build_duplo(prob_row: np.ndarray, classes: np.ndarray) -> str:
 
 
 def _choose_seco(prob_row: np.ndarray, p_max: float, gap: float, classes: np.ndarray,
-                 p_x: float) -> str:
+                 p_x: float, popularidade: float) -> str:
     """Apply heuristic rules to select a single outcome (seco)."""
 
     sorted_indices = prob_row.argsort()[::-1]
     top1, top2 = sorted_indices[:2]
+
+    # Anti-mercado leve: evite consenso extremo quando a popularidade estiver alta.
+    if p_max >= 0.65 and popularidade >= 0.65:
+        logging.debug(
+            "Aplicando anti-mercado: p_max=%.3f, popularidade=%.3f -> virando para %s",
+            p_max,
+            popularidade,
+            classes[top2],
+        )
+        return classes[top2]
 
     # Empate inteligente
     if classes[top1] == 'X' and p_max <= 0.45:
@@ -244,6 +275,8 @@ def predict(input_file, output_file):
         df = _normalize_probabilities(df)
         logging.info("Probabilidades carregadas e normalizadas.")
 
+        popularidade = _normalize_popularity(df)
+
         prob_array = df[['P(1)', 'P(X)', 'P(2)']].to_numpy()
         classes = np.array(['1', 'X', '2'])
 
@@ -261,7 +294,7 @@ def predict(input_file, output_file):
         df['Gap'] = gap
         df['Zebra'] = zebra
 
-        duplo_idxs = _choose_duplos(df, prob_array, classes)
+        duplo_idxs = _choose_duplos(df, prob_array, classes, popularidade)
 
         logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos baseados nas novas regras...")
         apostas = [''] * len(df)
@@ -275,7 +308,8 @@ def predict(input_file, output_file):
                     p_max=df.loc[idx, 'p_max'],
                     gap=df.loc[idx, 'Gap'],
                     classes=classes,
-                    p_x=df.loc[idx, 'P(X)']
+                    p_x=df.loc[idx, 'P(X)'],
+                    popularidade=popularidade[idx],
                 )
 
         apostas = _limit_favoritos(df, apostas, duplo_idxs, classes, prob_array)

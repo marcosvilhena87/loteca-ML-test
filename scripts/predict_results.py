@@ -1,7 +1,6 @@
 import logging
 import pandas as pd
 import numpy as np
-from joblib import load  # Para carregar os modelos previamente treinados
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -14,7 +13,7 @@ def predict(input_file, model_file, output_file):
     input_file : str
         CSV file with upcoming games and odds or probabilities.
     model_file : str
-        Path of the trained model to load.
+        Unused legacy parameter kept for API compatibility.
     output_file : str
         Destination path for the predictions CSV.
 
@@ -51,42 +50,32 @@ def predict(input_file, model_file, output_file):
         # Reconfirmando que as colunas de probabilidade agora estão presentes
         required_columns = ['P(1)', 'P(X)', 'P(2)']
         
-        # Carregando o modelo
-        logging.info("Carregando modelo...")
-        model = load(model_file)
+        # Utilizando diretamente as probabilidades do bookmaker para decisões
+        logging.info("Usando as probabilidades do bookmaker para gerar apostas...")
+        bookmaker_probs = df[required_columns].to_numpy(dtype=float)
 
-        # Selecionando as features para predição
-        logging.info("Preparando dados para predição...")
-        X_future = df[required_columns]
+        # Reforçando a normalização para somar 1
+        prob_sum = bookmaker_probs.sum(axis=1, keepdims=True)
+        if np.any(prob_sum == 0):
+            raise ValueError("Probabilidades do bookmaker não podem somar 0.")
+        normalized_probs = bookmaker_probs / prob_sum
 
-        # Gerando as predições
-        logging.info("Gerando predições...")
-        probabilities = model.predict_proba(X_future)
-        predictions = model.predict(X_future)
+        # Registrar as probabilidades usadas no output
+        df['Probabilidade (1)'] = np.round(normalized_probs[:, 0], 5)
+        df['Probabilidade (X)'] = np.round(normalized_probs[:, 1], 5)
+        df['Probabilidade (2)'] = np.round(normalized_probs[:, 2], 5)
 
-        # Garantindo mapeamento correto classe -> coluna
-        classes = model.classes_
-        class_indices = {label: idx for idx, label in enumerate(classes)}
-        try:
-            idx_1 = class_indices['1']
-            idx_X = class_indices['X']
-            idx_2 = class_indices['2']
-        except KeyError as missing:
-            raise ValueError(f"Classe esperada ausente no modelo: {missing}")
-
-        # Adicionando as predições ao DataFrame
-        logging.info("Adicionando predições ao DataFrame...")
-        df['Probabilidade (1)'] = np.round(probabilities[:, idx_1], 5)
-        df['Probabilidade (X)'] = np.round(probabilities[:, idx_X], 5)
-        df['Probabilidade (2)'] = np.round(probabilities[:, idx_2], 5)
-        df['Seco'] = predictions
+        # Seco = classe com maior probabilidade do bookmaker
+        class_labels = ['1', 'X', '2']
+        seco_indices = normalized_probs.argmax(axis=1)
+        df['Seco'] = [class_labels[i] for i in seco_indices]
 
         # Adicionando um valor pequeno para evitar problemas com log(0)
         epsilon = 1e-10
-        adjusted_probabilities = probabilities + epsilon
+        adjusted_probabilities = np.clip(normalized_probs, epsilon, 1.0)
 
         # Calculando a entropia com as probabilidades ajustadas
-        logging.info("Calculando entropia para determinar os jogos mais incertos...")
+        logging.info("Calculando entropia (com base no bookmaker) para determinar os jogos mais incertos...")
         df['Entropia'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
 
         # Identificar os 5 jogos mais incertos para aplicar os "duplos"
@@ -99,8 +88,9 @@ def predict(input_file, model_file, output_file):
 
         # Escolhendo os "duplos" para os 5 jogos mais incertos
         for idx in jogos_duplos_idxs:
-            mais_provaveis_idxs = probabilities[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
-            mais_provaveis_labels = [classes[i] for i in mais_provaveis_idxs]
+            row_probs = adjusted_probabilities[idx]
+            mais_provaveis_idxs = row_probs.argsort()[-2:][::-1]  # Duas maiores probabilidades
+            mais_provaveis_labels = [class_labels[i] for i in mais_provaveis_idxs]
             df.loc[idx, 'Aposta'] = ", ".join(mais_provaveis_labels)
 
         # Salvando as predições no arquivo

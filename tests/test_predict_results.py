@@ -22,7 +22,15 @@ def test_predict_results_output_columns(tmp_path):
         'Probabilidade (2)',
         'Seco',
         'Entropia',
+        'Gap',
+        'Zebra',
+        'Score Duplo',
         'Aposta'
     ]
     for col in expected:
         assert col in df.columns
+
+    # Garante 5 duplos e pelo menos 2 palpites com X para evitar pulverização.
+    duplos = df['Aposta'].str.contains(',')
+    assert duplos.sum() == 5
+    assert (df['Aposta'].str.contains('X')).sum() >= 2

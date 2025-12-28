@@ -45,20 +45,10 @@ def process(input_file, output_file):
 
         # Garantir a coluna 'Resultado'
         logging.info("Determinando os resultados reais dos jogos...")
-        resultado_cols = ['[1]', '[x]', '[2]']
-        if all(col in df.columns for col in resultado_cols):
-            escolha_unica = df[resultado_cols].sum(axis=1) == 1
-            linhas_invalidas = (~escolha_unica).sum()
-
-            if linhas_invalidas > 0:
-                logging.warning(
-                    f"{linhas_invalidas} linhas removidas por terem múltiplas ou nenhuma marcação em {resultado_cols}."
-                )
-
-            df = df[escolha_unica]
+        if all(col in df.columns for col in ['[1]', '[x]', '[2]']):
             df['Resultado'] = df.apply(lambda row: '1' if row['[1]'] == 1 else
                                                    'X' if row['[x]'] == 1 else
-                                                   '2', axis=1)
+                                                   '2' if row['[2]'] == 1 else None, axis=1)
         else:
             raise KeyError("As colunas '[1]', '[x]' e '[2]' são necessárias para calcular o resultado.")
 

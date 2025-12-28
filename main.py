@@ -30,17 +30,18 @@ def run_pipeline():
     process(raw_data_file, processed_data_file)
     logging.info(f"Dados processados salvos em {processed_data_file}")
 
-    # Passo 2: Avaliação do baseline
-    logging.info("[2/4] Calculando métricas do baseline...")
-    metrics_file = os.path.join(PATHS["models"], "baseline_metrics.json")
-    train(processed_data_file, metrics_file)
-    logging.info(f"Métricas salvas em {metrics_file}")
+    # Passo 2: Treinamento do modelo
+    logging.info("[2/4] Treinando modelo...")
+    model_file = os.path.join(PATHS["models"], "final_model.pkl")
+    scaler_file = os.path.join(PATHS["models"], "scaler.pkl")
+    train(processed_data_file, model_file, scaler_file)
+    logging.info(f"Modelo treinado e salvo em {model_file}")
 
     # Passo 3: Predição de resultados futuros
     logging.info("[3/4] Gerando predições...")
     future_games_file = os.path.join(PATHS["raw_data"], "proximo_concurso.csv")
     predictions_file = os.path.join(PATHS["output"], "predictions.csv")
-    predict(future_games_file, predictions_file)
+    predict(future_games_file, model_file, scaler_file, predictions_file)
     logging.info(f"Predições salvas em {predictions_file}")
 
     # Passo 4: Conclusão

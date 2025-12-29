@@ -52,6 +52,7 @@ def calculate_concurso_features(match_df: pd.DataFrame) -> pd.Series:
     top1 = sorted_probs[:, -1]
     top2 = sorted_probs[:, -2]
     gap = top1 - top2
+    gap_std = np.std(gap)
 
     epsilon = 1e-12
     adjusted = np.clip(probabilities, epsilon, 1.0)
@@ -66,6 +67,7 @@ def calculate_concurso_features(match_df: pd.DataFrame) -> pd.Series:
         "count_pmax_ge_0.60": int(np.sum(p_max >= 0.60)),
         "mean_gap": np.mean(gap),
         "min_gap": float(np.min(gap)),
+        "std_gap": gap_std,
         "mean_entropy": np.mean(entropy),
         "sum_entropy": np.sum(entropy),
         "count_gap_le_0.12": int(np.sum(gap <= 0.12)),
@@ -118,6 +120,7 @@ def train_pulverization_models(processed_matches_path: str, rateio_path: str, mo
         "count_pmax_ge_0.60",
         "mean_gap",
         "min_gap",
+        "std_gap",
         "mean_entropy",
         "sum_entropy",
         "count_gap_le_0.12",

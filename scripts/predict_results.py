@@ -12,10 +12,19 @@ logging.basicConfig(level=logging.INFO,
 
 def _ensure_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Garante que todas as colunas de features existam e estejam na ordem correta."""
-    for col in FEATURE_COLUMNS:
-        if col not in df.columns:
-            df[col] = np.nan
-    return df[FEATURE_COLUMNS]
+    missing_cols = [col for col in FEATURE_COLUMNS if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Colunas ausentes para predição: {missing_cols}")
+
+    feature_frame = df[FEATURE_COLUMNS]
+    if feature_frame.isna().any().any():
+        na_counts = feature_frame.isna().sum()
+        raise ValueError(
+            "Foram encontrados valores NaN nas features de predição, revise os dados de entrada: "
+            f"{na_counts[na_counts > 0].to_dict()}"
+        )
+
+    return feature_frame
 
 
 def predict(input_file, model_file, output_file):
@@ -72,10 +81,9 @@ def predict(input_file, model_file, output_file):
         if 'overround' not in df.columns:
             df['overround'] = probs.sum(axis=1)
 
-        # Carregando o pipeline completo
-        logging.info("Carregando pipeline de modelagem...")
-        pipeline = load(model_file)
-        model = pipeline.named_steps.get('model', pipeline)
+        # Carregando o modelo calibrado
+        logging.info("Carregando modelo de predição...")
+        model = load(model_file)
 
         # Selecionando as features para predição e escalando
         logging.info("Preparando dados para predição...")
@@ -83,8 +91,8 @@ def predict(input_file, model_file, output_file):
 
         # Gerando as predições
         logging.info("Gerando predições...")
-        probabilities = pipeline.predict_proba(feature_frame)
-        predictions = pipeline.predict(feature_frame)
+        probabilities = model.predict_proba(feature_frame)
+        predictions = model.predict(feature_frame)
         class_labels = list(model.classes_)
 
         # Adicionando as predições ao DataFrame

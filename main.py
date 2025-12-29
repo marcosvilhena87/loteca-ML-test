@@ -27,7 +27,8 @@ def run_pipeline():
     logging.info("[1/4] Processando dados...")
     raw_data_file = os.path.join(PATHS["raw_data"], "concursos_anteriores.csv")
     processed_data_file = os.path.join(PATHS["processed_data"], "loteca_treinamento.csv")
-    process(raw_data_file, processed_data_file)
+    rateio_file = os.path.join(PATHS["raw_data"], "concurso_rateio.csv")
+    process(raw_data_file, processed_data_file, rateio_file=rateio_file)
     logging.info(f"Dados processados salvos em {processed_data_file}")
 
     # Passo 2: Treinamento do modelo

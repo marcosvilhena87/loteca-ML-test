@@ -37,7 +37,6 @@ def predict(input_file, model_file, scaler_file, output_file):
 
         logging.info("Gerando predições...")
         raw_probabilities = model.predict_proba(X_future_scaled)
-        predictions = model.predict(X_future_scaled)
 
         expected_classes = ['1', 'X', '2']
         class_to_index = {cls: idx for idx, cls in enumerate(model.classes_)}
@@ -56,7 +55,9 @@ def predict(input_file, model_file, scaler_file, output_file):
         df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
         df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
         df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)
-        df['Seco'] = predictions
+
+        predictions_mapped = [expected_classes[idx] for idx in probabilities.argmax(axis=1)]
+        df['Seco'] = predictions_mapped
 
         epsilon = 1e-10
         adjusted_probabilities = probabilities + epsilon

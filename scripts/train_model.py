@@ -1,12 +1,31 @@
 import logging
+from typing import List
+
+import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
 from joblib import dump  # Usando joblib para salvar os modelos
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
+
+FEATURE_COLUMNS: List[str] = [
+    'P(1)',
+    'P(X)',
+    'P(2)',
+    'pmax',
+    'gap12',
+    'entropy',
+    'overround',
+    'jackpot_14',
+    'log_rateio_14',
+    'ganhadores_14',
+    'rollover_streak',
+]
 
 def train(input_file, model_file, scaler_file):
     """Train a classifier on processed data and persist artifacts.
@@ -30,18 +49,28 @@ def train(input_file, model_file, scaler_file):
         logging.info("Carregando os dados de entrada...")
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
 
-        # Selecionando as features (probabilidades) e o target (resultado real)
+        # Garantir que todas as colunas de features existam
+        logging.info("Preparando colunas de features...")
+        for col in FEATURE_COLUMNS:
+            if col not in df.columns:
+                logging.warning("Coluna %s ausente nos dados. Preenchendo com NaN.", col)
+                df[col] = np.nan
+
+        # Selecionando as features e o target (resultado real)
         logging.info("Selecionando as features e o target...")
-        X = df[['P(1)', 'P(X)', 'P(2)']]  # Features
+        X = df[FEATURE_COLUMNS]
         y = df['Resultado']  # Target: 1, X ou 2
 
         # Dividindo os dados em treino e teste
         logging.info("Dividindo os dados em treino e teste...")
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-        # Escalando as features
-        logging.info("Escalando as features...")
-        scaler = StandardScaler()
+        # Pipeline de imputação + escala
+        logging.info("Escalando as features (imputer + scaler)...")
+        scaler = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler()),
+        ])
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
 

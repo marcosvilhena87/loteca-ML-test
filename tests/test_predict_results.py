@@ -12,8 +12,9 @@ def test_predict_results_output_columns(tmp_path):
     model_file = tmp_path / "model.pkl"
     scaler_file = tmp_path / "scaler.pkl"
     predictions_file = tmp_path / "predictions.csv"
+    rateio_file = "data/raw/concurso_rateio.csv"
 
-    process(raw_train, processed_file)
+    process(raw_train, processed_file, rateio_file=rateio_file)
     train(processed_file, model_file, scaler_file)
     predict("data/raw/proximo_concurso.csv", model_file, scaler_file, predictions_file)
 

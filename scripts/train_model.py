@@ -1,8 +1,10 @@
 import logging
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
 from joblib import dump  # Usando joblib para salvar os modelos
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import log_loss
+from sklearn.model_selection import train_test_split
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -36,28 +38,53 @@ def train(input_file, model_file):
         logging.info("Dividindo os dados em treino e teste...")
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-        # Treinando o modelo
-        logging.info("Treinando o modelo...")
-        model = RandomForestClassifier(random_state=42, n_estimators=100, max_depth=None)
+        # Treinando o modelo com calibração de probabilidades
+        logging.info("Treinando o modelo com calibração para probabilidades bem calibradas...")
+        base_model = RandomForestClassifier(
+            random_state=42,
+            n_estimators=200,
+            max_depth=None,
+            class_weight="balanced_subsample",
+        )
+        model = CalibratedClassifierCV(estimator=base_model, method="isotonic", cv=3)
         model.fit(X_train, y_train)
 
-        # Avaliando o modelo
-        accuracy = model.score(X_test, y_test)
-        logging.info(f"Acurácia no conjunto de teste: {accuracy:.4f}")
+        # Avaliando o modelo com foco em qualidade probabilística
+        proba_pred = model.predict_proba(X_test)
+        model_log_loss = log_loss(y_test, proba_pred, labels=model.classes_)
+
+        y_test_one_hot = pd.get_dummies(y_test)
+        y_test_one_hot = y_test_one_hot.reindex(columns=model.classes_, fill_value=0)
+        brier_score = ((proba_pred - y_test_one_hot.values) ** 2).sum(axis=1).mean()
+
+        logging.info(f"Log loss no conjunto de teste: {model_log_loss:.4f}")
+        logging.info(f"Brier score no conjunto de teste: {brier_score:.4f}")
 
         # Baselines para comparação
         prob_cols = ['P(1)', 'P(X)', 'P(2)']
-        bookmaker_guess = X_test[prob_cols].idxmax(axis=1).map({
+        bookmaker_prob = X_test[prob_cols].rename(columns={
             'P(1)': '1',
             'P(X)': 'X',
             'P(2)': '2'
         })
-        bookmaker_accuracy = (bookmaker_guess == y_test).mean()
-        logging.info(f"Baseline bookmaker (argmax das probabilidades): {bookmaker_accuracy:.4f}")
+        bookmaker_prob = bookmaker_prob[model.classes_]
+        bookmaker_log_loss = log_loss(y_test, bookmaker_prob, labels=model.classes_)
+        bookmaker_brier = ((bookmaker_prob.values - y_test_one_hot.values) ** 2).sum(axis=1).mean()
+        logging.info(f"Baseline bookmaker log loss: {bookmaker_log_loss:.4f}")
+        logging.info(f"Baseline bookmaker Brier: {bookmaker_brier:.4f}")
 
         majority_class = y_train.value_counts().idxmax()
-        majority_accuracy = (y_test == majority_class).mean()
-        logging.info(f"Baseline classe majoritária ({majority_class}): {majority_accuracy:.4f}")
+        majority_prob = pd.DataFrame(
+            0,
+            index=y_test.index,
+            columns=model.classes_,
+            dtype=float,
+        )
+        majority_prob[majority_class] = 1.0
+        majority_log_loss = log_loss(y_test, majority_prob, labels=model.classes_)
+        majority_brier = ((majority_prob.values - y_test_one_hot.values) ** 2).sum(axis=1).mean()
+        logging.info(f"Baseline classe majoritária ({majority_class}) log loss: {majority_log_loss:.4f}")
+        logging.info(f"Baseline classe majoritária ({majority_class}) Brier: {majority_brier:.4f}")
 
         # Salvando o modelo
         logging.info(f"Salvando o modelo em {model_file}...")

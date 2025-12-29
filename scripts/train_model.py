@@ -5,62 +5,45 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from joblib import dump  # Usando joblib para salvar os modelos
 
+from .feature_engineering import MODEL_FEATURES
+
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
+
 def train(input_file, model_file, scaler_file):
-    """Train a classifier on processed data and persist artifacts.
-
-    Parameters
-    ----------
-    input_file : str
-        CSV file containing training features and labels.
-    model_file : str
-        Path to save the fitted model.
-    scaler_file : str
-        Path to save the fitted scaler.
-
-    Returns
-    -------
-    None
-        The trained model and scaler are written to disk.
-    """
+    """Train a classifier on processed data and persist artifacts."""
     try:
-        # Carregando os dados
         logging.info("Carregando os dados de entrada...")
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
 
-        # Selecionando as features (probabilidades) e o target (resultado real)
         logging.info("Selecionando as features e o target...")
-        X = df[['P(1)', 'P(X)', 'P(2)']]  # Features
-        y = df['Resultado']  # Target: 1, X ou 2
+        X = df[MODEL_FEATURES]
+        y = df['Resultado']
 
-        # Dividindo os dados em treino e teste
         logging.info("Dividindo os dados em treino e teste...")
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
 
-        # Escalando as features
         logging.info("Escalando as features...")
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
 
-        # Treinando o modelo
         logging.info("Treinando o modelo...")
         model = RandomForestClassifier(random_state=42, n_estimators=100, max_depth=None)
         model.fit(X_train_scaled, y_train)
 
-        # Avaliando o modelo
         accuracy = model.score(X_test_scaled, y_test)
         logging.info(f"Acurácia no conjunto de teste: {accuracy:.4f}")
 
-        # Salvando o modelo e o scaler
         logging.info(f"Salvando o modelo em {model_file} e o scaler em {scaler_file}...")
         dump(model, model_file)
         dump(scaler, scaler_file)
 
         logging.info("Treinamento concluído com sucesso!")
-    
+
     except FileNotFoundError:
         logging.error(f"Erro: O arquivo {input_file} não foi encontrado.")
     except ValueError as e:

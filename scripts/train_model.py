@@ -8,6 +8,8 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 try:
     from sklearn.frozen import FrozenEstimator
@@ -44,6 +46,24 @@ FEATURE_COLUMNS: List[str] = [
     'rollover_streak',
     'jackpot_14',
 ]
+
+
+def _build_log_reg_pipeline(**kwargs) -> Pipeline:
+    """Create a standardized Logistic Regression pipeline for reuse."""
+    return Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            (
+                "clf",
+                LogisticRegression(
+                    max_iter=1000,
+                    n_jobs=-1,
+                    solver='lbfgs',
+                    **kwargs,
+                ),
+            ),
+        ]
+    )
 
 
 def _temporal_train_test_split(
@@ -126,6 +146,9 @@ def train(input_file, model_file):
                 f"{na_counts[na_counts > 0].to_dict()}"
             )
 
+        feature_summary = X.describe().loc[["mean", "std"]].T
+        logging.info("Estatísticas de features (média e desvio padrão):\n%s", feature_summary)
+
         # Dividindo os dados em treino e teste
         logging.info("Dividindo os dados em treino e teste sem vazamento temporal...")
         df_train, df_test = _temporal_train_test_split(df)
@@ -155,12 +178,10 @@ def train(input_file, model_file):
         _log_metrics("Baseline odds", y_test, baseline_proba, baseline_labels)
 
         # Modelo principal: Regressão Logística Multinomial (sem calibração)
-        logging.info("Treinando Regressão Logística Multinomial sem calibração...")
-        log_reg = LogisticRegression(
-            max_iter=1000,
-            n_jobs=-1,
-            solver='lbfgs',
+        logging.info(
+            "Treinando Regressão Logística Multinomial com padronização (sem calibração)..."
         )
+        log_reg = _build_log_reg_pipeline()
         log_reg.fit(X_train, y_train)
         log_reg_proba_test = log_reg.predict_proba(X_test)
         log_reg_labels = list(log_reg.classes_)
@@ -196,7 +217,7 @@ def train(input_file, model_file):
                     X_fit, y_fit = df_fit[FEATURE_COLUMNS], df_fit['Resultado']
                     X_cal, y_cal = df_cal[FEATURE_COLUMNS], df_cal['Resultado']
 
-                    base = LogisticRegression(max_iter=1000, n_jobs=-1, solver='lbfgs')
+                    base = _build_log_reg_pipeline()
                     base.fit(X_fit, y_fit)
 
                     estimator = FrozenEstimator(base) if FrozenEstimator is not None else base

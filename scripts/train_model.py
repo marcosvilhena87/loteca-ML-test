@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 from joblib import dump
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss
 from sklearn.model_selection import train_test_split
@@ -113,6 +112,12 @@ def train(input_file, model_file):
         X_test, y_test = df_test[FEATURE_COLUMNS], df_test['Resultado']
 
         def _log_metrics(description: str, y_true, proba, class_labels: List[str]):
+            ordered_labels = sorted(class_labels)
+            if ordered_labels != class_labels:
+                order_idx = [class_labels.index(label) for label in ordered_labels]
+                proba = proba[:, order_idx]
+                class_labels = ordered_labels
+
             logloss_val = log_loss(y_true, proba, labels=class_labels)
             brier_val = _multiclass_brier(y_true, proba, class_labels)
             preds = [class_labels[idx] for idx in np.argmax(proba, axis=1)]
@@ -124,17 +129,9 @@ def train(input_file, model_file):
 
         # Baseline usando probabilidades derivadas das odds (sem modelo)
         logging.info("Calculando baseline A (odds puras)...")
-        baseline_labels = ['1', '2', 'X']
-        baseline_proba = df_test[['P(1)', 'P(2)', 'P(X)']].to_numpy()
+        baseline_labels = ['1', 'X', '2']
+        baseline_proba = df_test[['P(1)', 'P(X)', 'P(2)']].to_numpy()
         _log_metrics("Baseline odds", y_test, baseline_proba, baseline_labels)
-
-        # Modelo de comparação: RandomForest (sem imputação)
-        logging.info("Treinando RandomForest para comparação...")
-        rf_model = RandomForestClassifier(random_state=42, n_estimators=200, max_depth=None)
-        rf_model.fit(X_train, y_train)
-        rf_proba_test = rf_model.predict_proba(X_test)
-        rf_labels = list(rf_model.classes_)
-        _log_metrics("RandomForest", y_test, rf_proba_test, rf_labels)
 
         # Modelo principal: Regressão Logística Multinomial (sem calibração)
         logging.info("Treinando Regressão Logística Multinomial sem calibração...")

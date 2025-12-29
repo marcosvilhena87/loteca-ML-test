@@ -1,6 +1,11 @@
 import logging
-import pandas as pd
+import os
+
 import numpy as np
+import pandas as pd
+from joblib import load
+
+from .pulverization import calculate_concurso_features
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -65,6 +70,11 @@ def predict(input_file, model_file, output_file):
         if not np.all(np.isfinite(normalized_probs)):
             raise ValueError("Probabilidades do bookmaker resultaram em valores não numéricos.")
 
+        # Persistir as probabilidades normalizadas para reuso
+        df['P(1)'] = normalized_probs[:, 0]
+        df['P(X)'] = normalized_probs[:, 1]
+        df['P(2)'] = normalized_probs[:, 2]
+
         # Registrar as probabilidades usadas no output
         df['Probabilidade (1)'] = np.round(normalized_probs[:, 0], 5)
         df['Probabilidade (X)'] = np.round(normalized_probs[:, 1], 5)
@@ -99,13 +109,79 @@ def predict(input_file, model_file, output_file):
         df['Gap'] = p_max - second_best
 
         # Regra 2: selecionar duplos apenas em jogos equilibrados (gap <= 0.12)
-        n_duplos = 5
-        mask_equilibrado = (df['Gap'] <= 0.12) & (p_max < 0.55)
+        concurso_features = calculate_concurso_features(df[['P(1)', 'P(X)', 'P(2)']])
+
+        models_dir = os.path.dirname(model_file) or ""
+
+        def _load_bundle(path):
+            if not os.path.exists(path):
+                logging.warning("Modelo de pulverização não encontrado em %s", path)
+                return None
+            return load(path)
+
+        ganhadores_bundle = _load_bundle(os.path.join(models_dir, "pulverization_ganhadores.joblib"))
+        rateio_bundle = _load_bundle(os.path.join(models_dir, "pulverization_rateio.joblib"))
+
+        pred_ganhadores14 = None
+        pred_rateio14 = None
+        if ganhadores_bundle is not None:
+            feature_frame = pd.DataFrame([concurso_features])[ganhadores_bundle["feature_names"]]
+            pred_log = ganhadores_bundle["model"].predict(feature_frame)[0]
+            pred_ganhadores14 = float(np.expm1(pred_log))
+            logging.info("Pulverização prevista (ganhadores14): %.2f", pred_ganhadores14)
+
+        if rateio_bundle is not None:
+            feature_frame = pd.DataFrame([concurso_features])[rateio_bundle["feature_names"]]
+            pred_log_rateio = rateio_bundle["model"].predict(feature_frame)[0]
+            pred_rateio14 = float(np.exp(pred_log_rateio) - 1)
+            logging.info("Rateio previsto (14 acertos): R$ %.2f", pred_rateio14)
+
+        if pred_ganhadores14 is None:
+            logging.warning("Modelo de pulverização não carregado; usando configuração padrão.")
+
+        def _policy_from_pulverization(pred_ganhadores):
+            if pred_ganhadores is None:
+                return {
+                    "n_duplos": 5,
+                    "gap_threshold": 0.12,
+                    "max_contrarios": 1,
+                    "contrario_range": (0.50, 0.58),
+                    "min_second_best": 0.30,
+                }
+            if pred_ganhadores >= 50:
+                return {
+                    "n_duplos": 6,
+                    "gap_threshold": 0.14,
+                    "max_contrarios": 2,
+                    "contrario_range": (0.48, 0.62),
+                    "min_second_best": 0.28,
+                }
+            if pred_ganhadores <= 10:
+                return {
+                    "n_duplos": 5,
+                    "gap_threshold": 0.10,
+                    "max_contrarios": 0,
+                    "contrario_range": (0.0, 0.0),
+                    "min_second_best": 1.0,
+                }
+            return {
+                "n_duplos": 5,
+                "gap_threshold": 0.12,
+                "max_contrarios": 1,
+                "contrario_range": (0.50, 0.58),
+                "min_second_best": 0.30,
+            }
+
+        policy = _policy_from_pulverization(pred_ganhadores14)
+
+        n_duplos = policy["n_duplos"]
+        mask_equilibrado = (df['Gap'] <= policy["gap_threshold"]) & (p_max < 0.55)
         candidatos_duplo = df[mask_equilibrado].sort_values(by='Gap')
         if len(candidatos_duplo) < n_duplos:
             logging.info(
-                "Menos de %s jogos com gap <= 0.12. Completando com menores gaps restantes.",
+                "Menos de %s jogos com gap <= %.2f. Completando com menores gaps restantes.",
                 n_duplos,
+                policy["gap_threshold"],
             )
             faltantes = n_duplos - len(candidatos_duplo)
             restantes = df[~df.index.isin(candidatos_duplo.index)].sort_values(by='Gap')
@@ -127,21 +203,26 @@ def predict(input_file, model_file, output_file):
 
         candidatos_contrario = df.loc[
             (~df.index.isin(jogos_duplos_idxs))
-            & (p_max >= 0.50)
-            & (p_max <= 0.58)
-            & (second_best >= 0.30)
+            & (p_max >= policy["contrario_range"][0])
+            & (p_max <= policy["contrario_range"][1])
+            & (second_best >= policy["min_second_best"])
         ]
 
-        if not candidatos_contrario.empty:
-            escolhido = candidatos_contrario.sort_values(by='ProbSegundo', ascending=False)
-            idx_contrario = escolhido.index[0]
-            df.loc[idx_contrario, 'Aposta'] = top2_labels[idx_contrario][1]
-            logging.info(
-                "Aplicando antipulverização no jogo %s (favorito %.2f, segundo %.2f).",
-                idx_contrario,
-                p_max[idx_contrario],
-                second_best[idx_contrario],
+        if policy["max_contrarios"] > 0 and not candidatos_contrario.empty:
+            escolhidos = candidatos_contrario.sort_values(by='ProbSegundo', ascending=False).head(
+                policy["max_contrarios"]
             )
+            for idx_contrario in escolhidos.index:
+                df.loc[idx_contrario, 'Aposta'] = top2_labels[idx_contrario][1]
+                logging.info(
+                    "Aplicando antipulverização no jogo %s (favorito %.2f, segundo %.2f).",
+                    idx_contrario,
+                    p_max[idx_contrario],
+                    second_best[idx_contrario],
+                )
+
+        df['PredGanhadores14'] = pred_ganhadores14
+        df['PredRateio14'] = pred_rateio14
 
         # Salvando as predições no arquivo
         logging.info(f"Salvando predições no arquivo {output_file}...")

@@ -34,8 +34,17 @@ def train(input_file, model_file, scaler_file):
         X_test_scaled = scaler.transform(X_test)
 
         logging.info("Treinando o modelo...")
-        model = RandomForestClassifier(random_state=42, n_estimators=100, max_depth=None)
+        model = RandomForestClassifier(
+            random_state=42,
+            n_estimators=200,
+            max_depth=12,
+            min_samples_leaf=50,
+            min_samples_split=100,
+            class_weight='balanced'
+        )
         model.fit(X_train_scaled, y_train)
+
+        logging.info(f"Ordem das classes aprendida pelo modelo: {list(model.classes_)}")
 
         logging.info("Calculando métricas de avaliação...")
         y_test_proba = model.predict_proba(X_test_scaled)

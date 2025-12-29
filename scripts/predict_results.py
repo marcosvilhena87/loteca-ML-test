@@ -29,15 +29,30 @@ def predict(input_file, model_file, scaler_file, output_file):
         model = load(model_file)
         scaler = load(scaler_file)
 
+        logging.info(f"Ordem das classes do modelo: {list(model.classes_)}")
+
         logging.info("Preparando dados para predição...")
         X_future = df[MODEL_FEATURES]
         X_future_scaled = scaler.transform(X_future)
 
         logging.info("Gerando predições...")
-        probabilities = model.predict_proba(X_future_scaled)
+        raw_probabilities = model.predict_proba(X_future_scaled)
         predictions = model.predict(X_future_scaled)
 
-        logging.info("Adicionando predições ao DataFrame...")
+        expected_classes = ['1', 'X', '2']
+        class_to_index = {cls: idx for idx, cls in enumerate(model.classes_)}
+        missing_classes = [cls for cls in expected_classes if cls not in class_to_index]
+        if missing_classes:
+            raise ValueError(
+                f"Classes esperadas ausentes do modelo: {missing_classes}. "
+                f"Classes disponíveis: {list(model.classes_)}"
+            )
+
+        probabilities = np.column_stack(
+            [raw_probabilities[:, class_to_index[cls]] for cls in expected_classes]
+        )
+
+        logging.info("Adicionando predições ao DataFrame com mapeamento correto das classes...")
         df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
         df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
         df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)

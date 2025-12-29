@@ -64,6 +64,19 @@ PY
 
 This executes the same pipeline steps individually.
 
+## Interpreting model performance
+
+The classifier is trained **only on the bookmaker probabilities** (`P(1)`, `P(X)`, `P(2)`). Because the inputs contain no
+extra signals, the best achievable accuracy is effectively the bookmaker argmax. In practice you should expect the
+bookmaker baseline (always picking the highest probability) to sit near 0.52, with the RandomForest and a majority-class
+baseline slightly below. This is not a bug—there is simply no additional information for a model to exploit.
+
+For Loteca, raw accuracy is also a poor proxy for value. The pipeline is aimed at **expected value and controlled risk**:
+
+- probabilities and gaps guide which games become duplos or secos;
+- antipulverização optionally replaces one favorite when the contest looks highly concentrated;
+- the goal is to surface cards with favorable expected payouts rather than to beat the bookmaker on accuracy alone.
+
 ## Running tests
 
 The repository includes a few unit tests. Before running them, install all

@@ -4,11 +4,11 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 from joblib import dump
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss
 from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -74,7 +74,7 @@ def train(input_file, model_file):
     input_file : str
         CSV file containing training features and labels.
     model_file : str
-        Path to save the fitted pipeline (imputer + model).
+        Path to save the fitted pipeline.
 
     Returns
     -------
@@ -87,15 +87,22 @@ def train(input_file, model_file):
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
 
         # Garantir que todas as colunas de features existam
-        logging.info("Preparando colunas de features...")
-        for col in FEATURE_COLUMNS:
-            if col not in df.columns:
-                logging.warning("Coluna %s ausente nos dados. Preenchendo com NaN.", col)
-                df[col] = np.nan
+        logging.info("Validando colunas de features...")
+        missing_features = [col for col in FEATURE_COLUMNS if col not in df.columns]
+        if missing_features:
+            raise KeyError(f"Colunas ausentes nos dados processados: {missing_features}")
 
         # Selecionando as features e o target (resultado real)
         logging.info("Selecionando as features e o target...")
         y = df['Resultado']  # Target: 1, X ou 2
+        X = df[FEATURE_COLUMNS]
+
+        if X.isna().any().any():
+            na_counts = X.isna().sum()
+            raise ValueError(
+                "Foram encontrados valores NaN nas features, revise o preprocessamento: "
+                f"{na_counts[na_counts > 0].to_dict()}"
+            )
 
         # Dividindo os dados em treino e teste
         logging.info("Dividindo os dados em treino e teste sem vazamento temporal...")
@@ -103,31 +110,52 @@ def train(input_file, model_file):
         X_train, y_train = df_train[FEATURE_COLUMNS], df_train['Resultado']
         X_test, y_test = df_test[FEATURE_COLUMNS], df_test['Resultado']
 
-        # Pipeline de imputação + modelo
-        logging.info("Ajustando pipeline (imputer + RandomForest)...")
-        pipeline = Pipeline([
-            ('imputer', SimpleImputer(strategy='median')),
-            ('model', RandomForestClassifier(random_state=42, n_estimators=200, max_depth=None)),
-        ])
-        pipeline.fit(X_train, y_train)
+        def _log_metrics(description: str, y_true, proba, class_labels: List[str]):
+            logloss_val = log_loss(y_true, proba, labels=class_labels)
+            brier_val = _multiclass_brier(y_true, proba, class_labels)
+            preds = [class_labels[idx] for idx in np.argmax(proba, axis=1)]
+            accuracy_val = accuracy_score(y_true, preds)
+            logging.info("[%s] Log loss: %.4f", description, logloss_val)
+            logging.info("[%s] Brier score: %.4f", description, brier_val)
+            logging.info("[%s] Acurácia (referência): %.4f", description, accuracy_val)
+            return logloss_val, brier_val, accuracy_val
 
-        # Treinando o modelo
-        model = pipeline.named_steps['model']
-        logging.info("Modelo treinado com %s árvores.", model.n_estimators)
+        # Baseline usando probabilidades derivadas das odds (sem modelo)
+        logging.info("Calculando baseline A (odds puras)...")
+        baseline_labels = ['1', '2', 'X']
+        baseline_proba = df_test[['P(1)', 'P(2)', 'P(X)']].to_numpy()
+        _log_metrics("Baseline odds", y_test, baseline_proba, baseline_labels)
 
-        # Avaliando o modelo
-        proba_test = pipeline.predict_proba(X_test)
-        class_labels = list(model.classes_)
-        logloss = log_loss(y_test, proba_test, labels=class_labels)
-        brier = _multiclass_brier(y_test, proba_test, class_labels)
-        accuracy = accuracy_score(y_test, pipeline.predict(X_test))
-        logging.info("Log loss no conjunto de teste: %.4f", logloss)
-        logging.info("Brier score no conjunto de teste: %.4f", brier)
-        logging.info("Acurácia no conjunto de teste (referência): %.4f", accuracy)
+        # Modelo de comparação: RandomForest (sem imputação)
+        logging.info("Treinando RandomForest para comparação...")
+        rf_model = RandomForestClassifier(random_state=42, n_estimators=200, max_depth=None)
+        rf_model.fit(X_train, y_train)
+        rf_proba_test = rf_model.predict_proba(X_test)
+        rf_labels = list(rf_model.classes_)
+        _log_metrics("RandomForest", y_test, rf_proba_test, rf_labels)
 
-        # Salvando o modelo e o scaler
-        logging.info("Salvando pipeline completo em %s...", model_file)
-        dump(pipeline, model_file)
+        # Modelo principal: Regressão Logística Multinomial com calibração
+        logging.info("Treinando Regressão Logística Multinomial com calibração (isotonic)...")
+        log_reg = LogisticRegression(
+            max_iter=1000,
+            multi_class='multinomial',
+            n_jobs=-1,
+            solver='lbfgs',
+        )
+        calibrated_model = CalibratedClassifierCV(
+            estimator=log_reg,
+            method='isotonic',
+            cv=3,
+            n_jobs=-1,
+        )
+        calibrated_model.fit(X_train, y_train)
+        calibrated_proba_test = calibrated_model.predict_proba(X_test)
+        calibrated_labels = list(calibrated_model.classes_)
+        _log_metrics("LogisticRegression + calibration", y_test, calibrated_proba_test, calibrated_labels)
+
+        # Salvando o modelo calibrado
+        logging.info("Salvando modelo calibrado em %s...", model_file)
+        dump(calibrated_model, model_file)
 
         logging.info("Treinamento concluído com sucesso!")
     

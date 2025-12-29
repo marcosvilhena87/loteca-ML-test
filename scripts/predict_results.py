@@ -94,13 +94,14 @@ def predict(input_file, model_file, output_file):
         probabilities = model.predict_proba(feature_frame)
         predictions = model.predict(feature_frame)
         class_labels = list(model.classes_)
+        proba_df = pd.DataFrame(probabilities, columns=class_labels)
 
         # Adicionando as predições ao DataFrame
         logging.info("Adicionando predições ao DataFrame...")
-        df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
-        df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
-        df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)
-        df['Seco'] = predictions
+        df['Probabilidade (1)'] = proba_df['1'].round(5)
+        df['Probabilidade (X)'] = proba_df['X'].round(5)
+        df['Probabilidade (2)'] = proba_df['2'].round(5)
+        df['Seco'] = pd.Series(predictions).astype(str)
 
         # Adicionando um valor pequeno para evitar problemas com log(0)
         epsilon = 1e-10
@@ -138,9 +139,9 @@ def predict(input_file, model_file, output_file):
         df['Aposta'] = df['Seco']  # Copia as apostas secas inicialmente
 
         # Escolhendo os "duplos" para os 5 jogos mais incertos
+        top2 = np.argsort(probabilities, axis=1)[:, -2:]
         for idx in jogos_duplos_idxs:
-            mais_provaveis = probabilities[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
-            escolhas = [class_labels[mais_provaveis[0]], class_labels[mais_provaveis[1]]]
+            escolhas = [class_labels[i] for i in top2[idx]][::-1]
             df.loc[idx, 'Aposta'] = ", ".join(escolhas)
 
         # Salvando as predições no arquivo

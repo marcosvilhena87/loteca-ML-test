@@ -1,106 +1,10 @@
 import logging
-from typing import Optional
-
-import numpy as np
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
-H2H_MAP = {"V": 3, "E": 1, "D": 0}
-H2H_RES = {"V": 1, "E": 0, "D": -1}
-
-
-def _parse_h2h_sequence(seq: object, expected_len: int = 5):
-    """
-    seq esperado: 'E-V-V-V-D' (assumindo da esquerda -> mais recente).
-    Retorna dict com contagens/pontos e flag de existência.
-    """
-    if pd.isna(seq) or str(seq).strip() == "":
-        return {
-            "h2h_has": 0,
-            "h2h_w": 0,
-            "h2h_d": 0,
-            "h2h_l": 0,
-            "h2h_pts": 0,
-            "h2h_last": 0,
-        }
-
-    parts = [p.strip().upper() for p in str(seq).split("-") if p.strip() != ""]
-    parts = parts[:expected_len]
-
-    w = sum(1 for p in parts if p == "V")
-    d = sum(1 for p in parts if p == "E")
-    l = sum(1 for p in parts if p == "D")
-    pts = sum(H2H_MAP.get(p, 0) for p in parts)
-    last = H2H_RES.get(parts[0], 0) if parts else 0
-
-    return {
-        "h2h_has": 1,
-        "h2h_w": w,
-        "h2h_d": d,
-        "h2h_l": l,
-        "h2h_pts": pts,
-        "h2h_last": last,
-    }
-
-RATEIO_COLUMNS = {
-    "Concurso": "Concurso",
-    "Ganhadores 14 Acertos": "ganhadores_14",
-    "Rateio 14 Acertos": "rateio_14",
-}
-
-
-def _normalize_rateio_data(rateio_file: str) -> pd.DataFrame:
-    """Read and normalize the ``concurso_rateio.csv`` file.
-
-    Parameters
-    ----------
-    rateio_file : str
-        Path to the CSV containing prize information per ``Concurso``.
-
-    Returns
-    -------
-    pd.DataFrame
-        Normalized dataframe with engineered features ready for merge.
-    """
-    logging.info("Carregando dados de rateio...")
-    rateio_df = pd.read_csv(rateio_file, delimiter=';', decimal='.')
-
-    missing_cols = [col for col in RATEIO_COLUMNS if col not in rateio_df.columns]
-    if missing_cols:
-        raise KeyError(f"As seguintes colunas estão ausentes no rateio: {missing_cols}")
-
-    # Renomear e garantir tipos
-    rateio_df = rateio_df[list(RATEIO_COLUMNS.keys())].rename(columns=RATEIO_COLUMNS)
-    rateio_df['Concurso'] = pd.to_numeric(rateio_df['Concurso'], errors='coerce').astype('Int64')
-    rateio_df['ganhadores_14'] = pd.to_numeric(rateio_df['ganhadores_14'], errors='coerce').astype('Int64')
-    rateio_df['rateio_14'] = pd.to_numeric(rateio_df['rateio_14'], errors='coerce').astype(float)
-
-    # Feature engineering
-    rateio_df['jackpot_14'] = rateio_df['ganhadores_14'] == 0
-    rateio_df['log_rateio_14'] = np.log1p(rateio_df['rateio_14'])
-
-    # Bins de rateio para análises/relatórios
-    try:
-        rateio_df['faixa_rateio'] = pd.qcut(rateio_df['log_rateio_14'], 4, labels=False, duplicates='drop')
-    except ValueError:
-        # Caso não haja variabilidade suficiente
-        rateio_df['faixa_rateio'] = 0
-
-    # Sequência de jackpots (rollover)
-    rateio_df = rateio_df.sort_values('Concurso').reset_index(drop=True)
-    streak = 0
-    streaks = []
-    for jackpot in rateio_df['jackpot_14']:
-        streak = streak + 1 if jackpot else 0
-        streaks.append(streak)
-    rateio_df['rollover_streak'] = streaks
-
-    return rateio_df
-
-
-def process(input_file: str, output_file: str, rateio_file: Optional[str] = None):
+def process(input_file, output_file):
     """Clean historical data and compute probabilities.
 
     Parameters
@@ -132,10 +36,9 @@ def process(input_file: str, output_file: str, rateio_file: Optional[str] = None
         df['P(X)'] = 1 / df['Odds X']
         df['P(2)'] = 1 / df['Odds 2']
 
-        # Normalizar as probabilidades para somarem 1 e calcular overround
+        # Normalizar as probabilidades para somarem 1
         logging.info("Normalizando probabilidades...")
         prob_sum = df['P(1)'] + df['P(X)'] + df['P(2)']
-        df['overround'] = prob_sum
         df['P(1)'] /= prob_sum
         df['P(X)'] /= prob_sum
         df['P(2)'] /= prob_sum
@@ -152,70 +55,6 @@ def process(input_file: str, output_file: str, rateio_file: Optional[str] = None
         # Remover linhas inválidas
         logging.info("Removendo linhas inválidas...")
         df = df.dropna(subset=['Resultado', 'P(1)', 'P(X)', 'P(2)'])
-
-        # Features derivadas de probabilidade
-        logging.info("Calculando features derivadas das probabilidades...")
-        probs = df[['P(1)', 'P(X)', 'P(2)']].to_numpy()
-        df['pmax'] = probs.max(axis=1)
-        sorted_probs = np.sort(probs, axis=1)
-        df['gap12'] = sorted_probs[:, 2] - sorted_probs[:, 1]
-        epsilon = 1e-10
-        df['entropy'] = -np.sum((probs + epsilon) * np.log(probs + epsilon), axis=1)
-        df['log_odds_1x'] = np.log((df['P(1)'] + epsilon) / (df['P(X)'] + epsilon))
-        df['log_odds_12'] = np.log((df['P(1)'] + epsilon) / (df['P(2)'] + epsilon))
-        df['log_odds_x2'] = np.log((df['P(X)'] + epsilon) / (df['P(2)'] + epsilon))
-
-        # Features H2H (mandante e visitante)
-        for side, col in [("m", "last-5-h2h-mandante"), ("v", "last-5-h2h-visitante")]:
-            if col not in df.columns:
-                df[col] = np.nan
-
-            parsed = df[col].apply(_parse_h2h_sequence).apply(pd.Series)
-
-            df[f"h2h_{side}_has"] = parsed["h2h_has"].astype(int)
-            df[f"h2h_{side}_w5"] = parsed["h2h_w"].astype(int)
-            df[f"h2h_{side}_e5"] = parsed["h2h_d"].astype(int)
-            df[f"h2h_{side}_d5"] = parsed["h2h_l"].astype(int)
-            df[f"h2h_{side}_pts5"] = parsed["h2h_pts"].astype(int)
-            df[f"h2h_{side}_last"] = parsed["h2h_last"].astype(int)
-
-        df["h2h_pts_diff"] = df["h2h_m_pts5"] - df["h2h_v_pts5"]
-        df["h2h_has_both"] = (df["h2h_m_has"] & df["h2h_v_has"]).astype(int)
-
-        # Integração com rateio por Concurso
-        if rateio_file is not None:
-            if 'Concurso' not in df.columns:
-                raise KeyError("Coluna 'Concurso' é necessária para integrar o rateio.")
-
-            rateio_df = _normalize_rateio_data(rateio_file)
-            merged_before = len(df)
-            df = df.merge(rateio_df, on='Concurso', how='left')
-            matched = df['rateio_14'].notna().sum()
-            logging.info(
-                "Merge de rateio concluído: %s linhas originais, %s linhas com rateio." % (merged_before, matched)
-            )
-            missing = merged_before - matched
-            if missing:
-                logging.warning(
-                    "%s concursos ficaram sem informações de rateio após o merge (campos permanecerão NaN).",
-                    missing,
-                )
-
-        # Garantir que colunas de rateio existam mesmo sem merge
-        if 'log_rateio_14' not in df.columns:
-            df['log_rateio_14'] = np.nan
-        if 'jackpot_14' not in df.columns:
-            df['jackpot_14'] = np.nan
-        if 'rollover_streak' not in df.columns:
-            df['rollover_streak'] = np.nan
-
-        # Imputação simples para evitar NaNs no treino
-        rateio_median = df['log_rateio_14'].median()
-        if pd.isna(rateio_median):
-            rateio_median = 0.0
-        df['log_rateio_14'] = df['log_rateio_14'].fillna(rateio_median)
-        df['jackpot_14'] = df['jackpot_14'].fillna(0).astype(int)
-        df['rollover_streak'] = df['rollover_streak'].fillna(0).astype(int)
 
         # Salvar o arquivo processado
         logging.info(f"Salvando o arquivo processado em {output_file}...")

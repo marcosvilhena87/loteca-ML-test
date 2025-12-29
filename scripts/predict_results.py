@@ -1,67 +1,12 @@
 import logging
-from typing import List
-
-import numpy as np
 import pandas as pd
-from joblib import load
-
-from scripts.train_model import FEATURE_COLUMNS
+import numpy as np
+from joblib import load  # Para carregar os modelos previamente treinados
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
-H2H_MAP = {"V": 3, "E": 1, "D": 0}
-H2H_RES = {"V": 1, "E": 0, "D": -1}
-
-
-def _parse_h2h_sequence(seq: object, expected_len: int = 5):
-    """Parse sequences como 'E-V-V-V-D' e retorna contagens/pontos estáveis."""
-    if pd.isna(seq) or str(seq).strip() == "":
-        return {
-            "h2h_has": 0,
-            "h2h_w": 0,
-            "h2h_d": 0,
-            "h2h_l": 0,
-            "h2h_pts": 0,
-            "h2h_last": 0,
-        }
-
-    parts = [p.strip().upper() for p in str(seq).split("-") if p.strip() != ""]
-    parts = parts[:expected_len]
-
-    w = sum(1 for p in parts if p == "V")
-    d = sum(1 for p in parts if p == "E")
-    l = sum(1 for p in parts if p == "D")
-    pts = sum(H2H_MAP.get(p, 0) for p in parts)
-    last = H2H_RES.get(parts[0], 0) if parts else 0
-
-    return {
-        "h2h_has": 1,
-        "h2h_w": w,
-        "h2h_d": d,
-        "h2h_l": l,
-        "h2h_pts": pts,
-        "h2h_last": last,
-    }
-
-def _ensure_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Garante que todas as colunas de features existam e estejam na ordem correta."""
-    missing_cols = [col for col in FEATURE_COLUMNS if col not in df.columns]
-    if missing_cols:
-        raise ValueError(f"Colunas ausentes para predição: {missing_cols}")
-
-    feature_frame = df[FEATURE_COLUMNS]
-    if feature_frame.isna().any().any():
-        na_counts = feature_frame.isna().sum()
-        raise ValueError(
-            "Foram encontrados valores NaN nas features de predição, revise os dados de entrada: "
-            f"{na_counts[na_counts > 0].to_dict()}"
-        )
-
-    return feature_frame
-
-
-def predict(input_file, model_file, output_file):
+def predict(input_file, model_file, scaler_file, output_file):
     """Generate predictions for future games and write them to CSV.
 
     Parameters
@@ -70,6 +15,8 @@ def predict(input_file, model_file, output_file):
         CSV file with upcoming games and odds or probabilities.
     model_file : str
         Path of the trained model to load.
+    scaler_file : str
+        Path of the scaler used during training.
     output_file : str
         Destination path for the predictions CSV.
 
@@ -84,7 +31,7 @@ def predict(input_file, model_file, output_file):
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
 
         # Verificando se as colunas de probabilidades estão presentes
-        required_prob_cols: List[str] = ['P(1)', 'P(X)', 'P(2)']
+        required_prob_cols = ['P(1)', 'P(X)', 'P(2)']
         if not all(col in df.columns for col in required_prob_cols):
             # Caso as colunas de probabilidade não existam, calculá-las a partir das odds
             odds_cols = ['Odds 1', 'Odds X', 'Odds 2']
@@ -95,7 +42,6 @@ def predict(input_file, model_file, output_file):
                 df['P(2)'] = 1 / df['Odds 2']
 
                 prob_sum = df['P(1)'] + df['P(X)'] + df['P(2)']
-                df['overround'] = prob_sum
                 df['P(1)'] /= prob_sum
                 df['P(X)'] /= prob_sum
                 df['P(2)'] /= prob_sum
@@ -104,80 +50,30 @@ def predict(input_file, model_file, output_file):
                     f"As colunas de odds {odds_cols} são necessárias para calcular as probabilidades no arquivo {input_file}."
                 )
 
-        # Features derivadas de probabilidade
-        logging.info("Calculando features adicionais para as probabilidades...")
-        probs = df[['P(1)', 'P(X)', 'P(2)']].to_numpy()
-        df['pmax'] = probs.max(axis=1)
-        sorted_probs = np.sort(probs, axis=1)
-        df['gap12'] = sorted_probs[:, 2] - sorted_probs[:, 1]
-        epsilon = 1e-10
-        df['entropy'] = -np.sum((probs + epsilon) * np.log(probs + epsilon), axis=1)
-        df['log_odds_1x'] = np.log((df['P(1)'] + epsilon) / (df['P(X)'] + epsilon))
-        df['log_odds_12'] = np.log((df['P(1)'] + epsilon) / (df['P(2)'] + epsilon))
-        df['log_odds_x2'] = np.log((df['P(X)'] + epsilon) / (df['P(2)'] + epsilon))
-        if 'overround' not in df.columns:
-            df['overround'] = probs.sum(axis=1)
-
-        # Features H2H (mandante e visitante)
-        for side, col in [("m", "last-5-h2h-mandante"), ("v", "last-5-h2h-visitante")]:
-            if col not in df.columns:
-                df[col] = np.nan
-
-            parsed = df[col].apply(_parse_h2h_sequence).apply(pd.Series)
-
-            df[f"h2h_{side}_has"] = parsed["h2h_has"].astype(int)
-            df[f"h2h_{side}_w5"] = parsed["h2h_w"].astype(int)
-            df[f"h2h_{side}_e5"] = parsed["h2h_d"].astype(int)
-            df[f"h2h_{side}_d5"] = parsed["h2h_l"].astype(int)
-            df[f"h2h_{side}_pts5"] = parsed["h2h_pts"].astype(int)
-            df[f"h2h_{side}_last"] = parsed["h2h_last"].astype(int)
-
-        df["h2h_pts_diff"] = df["h2h_m_pts5"] - df["h2h_v_pts5"]
-        df["h2h_has_both"] = (df["h2h_m_has"] & df["h2h_v_has"]).astype(int)
-
-        # Garantir features de rateio mesmo quando não disponíveis
-        if 'log_rateio_14' not in df.columns:
-            df['log_rateio_14'] = np.nan
-        if 'jackpot_14' not in df.columns:
-            df['jackpot_14'] = np.nan
-        if 'rollover_streak' not in df.columns:
-            df['rollover_streak'] = np.nan
-
-        rateio_median = df['log_rateio_14'].median()
-        if pd.isna(rateio_median):
-            rateio_median = 0.0
-        df['log_rateio_14'] = df['log_rateio_14'].fillna(rateio_median)
-        df['jackpot_14'] = df['jackpot_14'].fillna(0).astype(int)
-        df['rollover_streak'] = df['rollover_streak'].fillna(0).astype(int)
-
-        # Carregando o modelo calibrado
-        logging.info("Carregando modelo de predição...")
+        # Reconfirmando que as colunas de probabilidade agora estão presentes
+        required_columns = ['P(1)', 'P(X)', 'P(2)']
+        
+        # Carregando o modelo e o scaler
+        logging.info("Carregando modelo e scaler...")
         model = load(model_file)
+        scaler = load(scaler_file)
 
         # Selecionando as features para predição e escalando
         logging.info("Preparando dados para predição...")
-        feature_frame = _ensure_feature_columns(df)
-
-        if hasattr(model, "n_features_in_") and model.n_features_in_ != feature_frame.shape[1]:
-            raise ValueError(
-                f"Modelo foi treinado com {model.n_features_in_} features, "
-                f"mas a predição recebeu {feature_frame.shape[1]}. "
-                "Apague o models/final_model.pkl e retreine."
-            )
+        X_future = df[required_columns]
+        X_future_scaled = scaler.transform(X_future)
 
         # Gerando as predições
         logging.info("Gerando predições...")
-        probabilities = model.predict_proba(feature_frame)
-        predictions = model.predict(feature_frame)
-        class_labels = list(model.classes_)
-        proba_df = pd.DataFrame(probabilities, columns=class_labels)
+        probabilities = model.predict_proba(X_future_scaled)
+        predictions = model.predict(X_future_scaled)
 
         # Adicionando as predições ao DataFrame
         logging.info("Adicionando predições ao DataFrame...")
-        df['Probabilidade (1)'] = proba_df['1'].round(5)
-        df['Probabilidade (X)'] = proba_df['X'].round(5)
-        df['Probabilidade (2)'] = proba_df['2'].round(5)
-        df['Seco'] = pd.Series(predictions).astype(str)
+        df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
+        df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
+        df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)        
+        df['Secos'] = predictions
 
         # Adicionando um valor pequeno para evitar problemas com log(0)
         epsilon = 1e-10
@@ -187,38 +83,19 @@ def predict(input_file, model_file, output_file):
         logging.info("Calculando entropia para determinar os jogos mais incertos...")
         df['Entropia'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
 
-        # Heurística de EV para definição dos 5 duplos
-        logging.info("Calculando score de EV para seleção de duplos...")
-        top_two_sorted = np.sort(probabilities, axis=1)[:, ::-1][:, :2]
-        seco_prob = top_two_sorted[:, 0]
-        duplo_prob = top_two_sorted.sum(axis=1)
-        ganho_marginal = duplo_prob - seco_prob
-
-        # Fator de payout contínuo baseado em incerteza e rollover
-        entropy_norm = df['entropy'] / np.log(3)
-        underdog_bonus = (0.6 - df['pmax']).clip(lower=0) * 0.8
-        volatilidade_bonus = entropy_norm * 0.5
-        payout_prior = 1.0 + underdog_bonus + volatilidade_bonus
-
-        if 'rollover_streak' in df.columns:
-            payout_prior *= 1 + 0.03 * df['rollover_streak'].fillna(0).clip(upper=20)
-        if 'log_rateio_14' in df.columns:
-            median_rateio = df['log_rateio_14'].median()
-            payout_prior *= 1 + 0.05 * (df['log_rateio_14'].fillna(median_rateio) - median_rateio)
-
-        score_ev = ganho_marginal * payout_prior
-        jogos_duplos_idxs = pd.Series(score_ev).nlargest(5).index
-        logging.info(f"Índices selecionados para duplos: {jogos_duplos_idxs.tolist()}")
+        # Identificar os 5 jogos mais incertos para aplicar os "duplos"
+        jogos_duplos_idxs = df.nlargest(5, 'Entropia').index
+        logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")
 
         # Gerar a coluna "Aposta"
         logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
-        df['Aposta'] = df['Seco']  # Copia as apostas secas inicialmente
+        df['Aposta'] = df['Secos']  # Copia as apostas secas inicialmente
 
         # Escolhendo os "duplos" para os 5 jogos mais incertos
-        top2 = np.argsort(probabilities, axis=1)[:, -2:]
+        duplo_opcoes = ['1', 'X', '2']
         for idx in jogos_duplos_idxs:
-            escolhas = [class_labels[i] for i in top2[idx]][::-1]
-            df.loc[idx, 'Aposta'] = ", ".join(escolhas)
+            mais_provaveis = probabilities[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
+            df.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"
 
         # Salvando as predições no arquivo
         logging.info(f"Salvando predições no arquivo {output_file}...")

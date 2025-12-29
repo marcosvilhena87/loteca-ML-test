@@ -31,7 +31,7 @@ Execute the following from the repository root:
 python main.py
 ```
 
-The script processes the raw data, trains a multinomial `LogisticRegression` model (keeping an odds-based baseline for reference), and writes predictions to `output/predictions.csv`.
+The script processes the raw data, trains a `RandomForestClassifier` and writes predictions to `output/predictions.csv`.
 
 ## Running individual steps
 
@@ -43,18 +43,16 @@ from scripts import process, train, predict
 
 process(
     'data/raw/concursos_anteriores.csv',
-    'data/processed/loteca_treinamento.csv',
-    rateio_file='data/raw/concurso_rateio.csv'
-)
+    'data/processed/loteca_treinamento.csv')
 train(
     'data/processed/loteca_treinamento.csv',
-    'models/final_model.pkl'
-)
+    'models/final_model.pkl',
+    'models/scaler.pkl')
 predict(
     'data/raw/proximo_concurso.csv',
     'models/final_model.pkl',
-    'output/predictions.csv'
-)
+    'models/scaler.pkl',
+    'output/predictions.csv')
 PY
 ```
 

@@ -1,278 +1,63 @@
 import logging
-from typing import List, Tuple
-
-import numpy as np
 import pandas as pd
-from joblib import dump
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, log_loss
 from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
-
-try:
-    from sklearn.frozen import FrozenEstimator
-except ImportError:  # Compatibilidade com versões mais antigas do sklearn
-    FrozenEstimator = None
+from joblib import dump  # Usando joblib para salvar os modelos
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
-FEATURE_COLUMNS: List[str] = [
-    'P(1)',
-    'P(X)',
-    'P(2)',
-    'overround',
-    'log_odds_1x',
-    'log_odds_12',
-    'log_odds_x2',
-    'pmax',
-    'gap12',
-    'entropy',
-    'h2h_m_pts5',
-    'h2h_v_pts5',
-    'h2h_pts_diff',
-    'h2h_has_both',
-    'h2h_m_last',
-    'h2h_v_last',
-    'h2h_m_w5',
-    'h2h_m_e5',
-    'h2h_m_d5',
-    'h2h_v_w5',
-    'h2h_v_e5',
-    'h2h_v_d5',
-    'log_rateio_14',
-    'rollover_streak',
-    'jackpot_14',
-]
-
-
-def _build_log_reg_pipeline(**kwargs) -> Pipeline:
-    """Create a standardized Logistic Regression pipeline for reuse."""
-    return Pipeline(
-        [
-            ("scaler", StandardScaler()),
-            (
-                "clf",
-                LogisticRegression(
-                    max_iter=1000,
-                    n_jobs=-1,
-                    solver='lbfgs',
-                    **kwargs,
-                ),
-            ),
-        ]
-    )
-
-
-def _temporal_train_test_split(
-    df: pd.DataFrame, test_size: float = 0.2
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Split data by ``Concurso`` ordering to avoid leakage."""
-    if 'Concurso' not in df.columns:
-        logging.warning(
-            "Coluna 'Concurso' ausente; usando split estratificado aleatório como fallback."
-        )
-        return train_test_split(df, test_size=test_size, random_state=42, stratify=df['Resultado'])
-
-    concursos_ordenados = df['Concurso'].dropna().sort_values().unique()
-    if len(concursos_ordenados) == 0:
-        logging.warning(
-            "Nenhum valor válido em 'Concurso'; usando split estratificado aleatório como fallback."
-        )
-        return train_test_split(df, test_size=test_size, random_state=42, stratify=df['Resultado'])
-
-    n_test = max(1, int(len(concursos_ordenados) * test_size))
-    concursos_teste = concursos_ordenados[-n_test:]
-    df_teste = df[df['Concurso'].isin(concursos_teste)]
-    df_treino = df[~df['Concurso'].isin(concursos_teste)]
-
-    if df_treino.empty or df_teste.empty:
-        logging.warning(
-            "Split temporal resultou em conjunto vazio; usando split estratificado aleatório como fallback."
-        )
-        return train_test_split(df, test_size=test_size, random_state=42, stratify=df['Resultado'])
-
-    logging.info(
-        "Split temporal: %s concursos para treino, %s para teste.",
-        df_treino['Concurso'].nunique(),
-        df_teste['Concurso'].nunique(),
-    )
-    return df_treino, df_teste
-
-
-def _multiclass_brier(y_true: pd.Series, proba: np.ndarray, class_labels: List[str]) -> float:
-    """Compute multiclass Brier score as mean squared error between probs and one-hot labels."""
-    y_true_onehot = pd.get_dummies(y_true).reindex(columns=class_labels, fill_value=0).to_numpy()
-    return float(np.mean(np.sum((proba - y_true_onehot) ** 2, axis=1)))
-
-
-def train(input_file, model_file):
-    """Train a classifier on processed data and persist a single pipeline.
+def train(input_file, model_file, scaler_file):
+    """Train a classifier on processed data and persist artifacts.
 
     Parameters
     ----------
     input_file : str
         CSV file containing training features and labels.
     model_file : str
-        Path to save the fitted pipeline.
+        Path to save the fitted model.
+    scaler_file : str
+        Path to save the fitted scaler.
 
     Returns
     -------
-        None
-        The trained pipeline is written to disk.
+    None
+        The trained model and scaler are written to disk.
     """
     try:
         # Carregando os dados
         logging.info("Carregando os dados de entrada...")
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
 
-        # Garantir que todas as colunas de features existam
-        logging.info("Validando colunas de features...")
-        missing_features = [col for col in FEATURE_COLUMNS if col not in df.columns]
-        if missing_features:
-            raise KeyError(f"Colunas ausentes nos dados processados: {missing_features}")
-
-        # Selecionando as features e o target (resultado real)
+        # Selecionando as features (probabilidades) e o target (resultado real)
         logging.info("Selecionando as features e o target...")
+        X = df[['P(1)', 'P(X)', 'P(2)']]  # Features
         y = df['Resultado']  # Target: 1, X ou 2
-        X = df[FEATURE_COLUMNS]
-
-        if X.isna().any().any():
-            na_counts = X.isna().sum()
-            raise ValueError(
-                "Foram encontrados valores NaN nas features, revise o preprocessamento: "
-                f"{na_counts[na_counts > 0].to_dict()}"
-            )
-
-        feature_summary = X.describe().loc[["mean", "std"]].T
-        logging.info("Estatísticas de features (média e desvio padrão):\n%s", feature_summary)
 
         # Dividindo os dados em treino e teste
-        logging.info("Dividindo os dados em treino e teste sem vazamento temporal...")
-        df_train, df_test = _temporal_train_test_split(df)
-        X_train, y_train = df_train[FEATURE_COLUMNS], df_train['Resultado']
-        X_test, y_test = df_test[FEATURE_COLUMNS], df_test['Resultado']
+        logging.info("Dividindo os dados em treino e teste...")
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-        def _log_metrics(description: str, y_true, proba, class_labels: List[str]):
-            ordered_labels = sorted(class_labels)
-            if ordered_labels != class_labels:
-                order_idx = [class_labels.index(label) for label in ordered_labels]
-                proba = proba[:, order_idx]
-                class_labels = ordered_labels
+        # Escalando as features
+        logging.info("Escalando as features...")
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
 
-            logloss_val = log_loss(y_true, proba, labels=class_labels)
-            brier_val = _multiclass_brier(y_true, proba, class_labels)
-            preds = [class_labels[idx] for idx in np.argmax(proba, axis=1)]
-            accuracy_val = accuracy_score(y_true, preds)
-            logging.info("[%s] Log loss: %.4f", description, logloss_val)
-            logging.info("[%s] Brier score: %.4f", description, brier_val)
-            logging.info("[%s] Acurácia (referência): %.4f", description, accuracy_val)
-            return logloss_val, brier_val, accuracy_val
+        # Treinando o modelo
+        logging.info("Treinando o modelo...")
+        model = RandomForestClassifier(random_state=42, n_estimators=100, max_depth=None)
+        model.fit(X_train_scaled, y_train)
 
-        # Baseline usando probabilidades derivadas das odds (sem modelo)
-        logging.info("Calculando baseline A (odds puras)...")
-        baseline_labels = ['1', 'X', '2']
-        baseline_proba = df_test[['P(1)', 'P(X)', 'P(2)']].to_numpy()
-        _log_metrics("Baseline odds", y_test, baseline_proba, baseline_labels)
+        # Avaliando o modelo
+        accuracy = model.score(X_test_scaled, y_test)
+        logging.info(f"Acurácia no conjunto de teste: {accuracy:.4f}")
 
-        # Modelo principal: Regressão Logística Multinomial (sem calibração)
-        logging.info(
-            "Treinando Regressão Logística Multinomial com padronização (sem calibração)..."
-        )
-        log_reg = _build_log_reg_pipeline()
-        log_reg.fit(X_train, y_train)
-        log_reg_proba_test = log_reg.predict_proba(X_test)
-        log_reg_labels = list(log_reg.classes_)
-        log_reg_logloss, _, _ = _log_metrics(
-            "LogisticRegression", y_test, log_reg_proba_test, log_reg_labels
-        )
-
-        # Modelo padrão a ser salvo (não calibrado, salvo se a calibração trouxer ganho real)
-        best_model = log_reg
-        best_logloss = log_reg_logloss
-
-        # Calibração opcional com holdout por Concurso usando prefit
-        calibrated_model = None
-        try:
-            if 'Concurso' in df_train.columns and df_train['Concurso'].nunique(dropna=True) >= 2:
-                concursos_train = df_train['Concurso'].dropna().sort_values().unique()
-                n_cal = max(1, int(0.10 * len(concursos_train)))
-                concursos_cal = concursos_train[-n_cal:]
-
-                df_fit = df_train[~df_train['Concurso'].isin(concursos_cal)]
-                df_cal = df_train[df_train['Concurso'].isin(concursos_cal)]
-
-                if df_fit.empty or df_cal.empty:
-                    logging.warning(
-                        "Calibração sigmoid ignorada: divisão holdout por Concurso gerou subconjuntos vazios.",
-                    )
-                else:
-                    logging.info(
-                        "Treinando calibração Platt (sigmoid) com holdout de %s concursos.",
-                        df_cal['Concurso'].nunique(),
-                    )
-
-                    X_fit, y_fit = df_fit[FEATURE_COLUMNS], df_fit['Resultado']
-                    X_cal, y_cal = df_cal[FEATURE_COLUMNS], df_cal['Resultado']
-
-                    base = _build_log_reg_pipeline()
-                    base.fit(X_fit, y_fit)
-
-                    estimator = FrozenEstimator(base) if FrozenEstimator is not None else base
-                    calibrated_model = CalibratedClassifierCV(
-                        estimator=estimator,
-                        method='sigmoid',
-                        cv=5 if FrozenEstimator is not None else 'prefit'
-                    )
-                    if FrozenEstimator is None:
-                        logging.warning(
-                            "sklearn.frozen indisponível; usando cv='prefit' (com aviso de deprecated)."
-                        )
-                    calibrated_model.fit(X_cal, y_cal)
-
-                    calibrated_proba_test = calibrated_model.predict_proba(X_test)
-                    calibrated_labels = list(calibrated_model.classes_)
-                    calibrated_logloss, _, _ = _log_metrics(
-                        "LogisticRegression + calibração sigmoid (holdout)",
-                        y_test,
-                        calibrated_proba_test,
-                        calibrated_labels,
-                    )
-
-                    if calibrated_logloss < best_logloss:
-                        logging.info(
-                            "Calibração manteve ou melhorou o LogLoss (%.4f -> %.4f); modelo calibrado selecionado.",
-                            best_logloss,
-                            calibrated_logloss,
-                        )
-                        best_model = calibrated_model
-                        best_logloss = calibrated_logloss
-                    else:
-                        logging.info(
-                            "Calibração não trouxe ganho de LogLoss (%.4f vs %.4f); mantendo modelo não calibrado.",
-                            calibrated_logloss,
-                            best_logloss,
-                        )
-            elif 'Concurso' not in df_train.columns:
-                logging.warning(
-                    "Calibração sigmoid ignorada: coluna 'Concurso' ausente para definição de grupos.",
-                )
-            else:
-                logging.warning(
-                    "Calibração sigmoid ignorada: menos de 2 concursos distintos disponíveis.",
-                )
-        except Exception as e:
-            logging.warning(
-                "Falha na calibração; salvando modelo não calibrado. Erro: %s", e
-            )
-            calibrated_model = None
-
-        # Salvando o melhor modelo disponível
-        model_to_save = best_model
-        logging.info("Salvando modelo em %s...", model_file)
-        dump(model_to_save, model_file)
+        # Salvando o modelo e o scaler
+        logging.info(f"Salvando o modelo em {model_file} e o scaler em {scaler_file}...")
+        dump(model, model_file)
+        dump(scaler, scaler_file)
 
         logging.info("Treinamento concluído com sucesso!")
     

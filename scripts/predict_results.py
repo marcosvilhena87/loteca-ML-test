@@ -139,35 +139,8 @@ def predict(input_file, model_file, output_file):
         if pred_ganhadores14 is None:
             logging.warning("Modelo de pulverização não carregado; usando configuração padrão.")
 
-        def _policy_from_pulverization(pred_ganhadores):
-            if pred_ganhadores is None:
-                return {
-                    "n_duplos": 5,
-                    "gap_threshold": 0.12,
-                    "min_second_best_duplo": 0.25,
-                    "max_contrarios": 1,
-                    "contrario_range": (0.50, 0.58),
-                    "min_second_best": 0.30,
-                }
-            if pred_ganhadores >= 50:
-                return {
-                    "n_duplos": 6,
-                    "gap_threshold": 0.14,
-                    "min_second_best_duplo": 0.25,
-                    "max_contrarios": 2,
-                    "contrario_range": (0.48, 0.62),
-                    "min_second_best": 0.28,
-                }
-            if pred_ganhadores <= 10:
-                return {
-                    "n_duplos": 5,
-                    "gap_threshold": 0.10,
-                    "min_second_best_duplo": 0.25,
-                    "max_contrarios": 0,
-                    "contrario_range": (0.0, 0.0),
-                    "min_second_best": 1.0,
-                }
-            return {
+        def _policy_from_pulverization(pred_ganhadores, pred_rateio):
+            base_policy = {
                 "n_duplos": 5,
                 "gap_threshold": 0.12,
                 "min_second_best_duplo": 0.25,
@@ -176,7 +149,47 @@ def predict(input_file, model_file, output_file):
                 "min_second_best": 0.30,
             }
 
-        policy = _policy_from_pulverization(pred_ganhadores14)
+            if pred_ganhadores is None:
+                return base_policy
+
+            rateio_baixo = pred_rateio is None or pred_rateio <= 1_000_000
+            muitos_ganhadores = pred_ganhadores >= 50
+            varios_ganhadores = pred_ganhadores >= 30
+
+            if pred_ganhadores >= 50:
+                base_policy.update({
+                    "n_duplos": 6,
+                    "gap_threshold": 0.14,
+                    "min_second_best": 0.28,
+                })
+            elif pred_ganhadores <= 10:
+                base_policy.update({
+                    "gap_threshold": 0.10,
+                    "max_contrarios": 0,
+                    "contrario_range": (0.0, 0.0),
+                    "min_second_best": 1.0,
+                })
+
+            if (muitos_ganhadores or varios_ganhadores) and rateio_baixo:
+                if muitos_ganhadores:
+                    base_policy.update({
+                        "max_contrarios": 2,
+                        "contrario_range": (0.48, 0.62),
+                    })
+                else:
+                    base_policy.update({
+                        "max_contrarios": 1,
+                        "contrario_range": (0.50, 0.60),
+                    })
+            else:
+                base_policy.update({
+                    "max_contrarios": 0,
+                    "contrario_range": (0.0, 0.0),
+                })
+
+            return base_policy
+
+        policy = _policy_from_pulverization(pred_ganhadores14, pred_rateio14)
 
         n_duplos = policy["n_duplos"]
         min_second_best_duplo = policy["min_second_best_duplo"]
@@ -216,6 +229,8 @@ def predict(input_file, model_file, output_file):
 
         # Regra 3: antipulverização controlada (1 contrário opcional)
         df['Aposta'] = df['Seco']
+        df['ContrarioAplicado'] = False
+        df['Motivo'] = ""
         if len(jogos_duplos_idxs) > 0:
             logging.info("Aplicando duplos a %s jogos conforme regra de gap.", len(jogos_duplos_idxs))
         for idx in jogos_duplos_idxs:
@@ -229,11 +244,21 @@ def predict(input_file, model_file, output_file):
         ]
 
         if policy["max_contrarios"] > 0 and not candidatos_contrario.empty:
-            escolhidos = candidatos_contrario.sort_values(by='ProbSegundo', ascending=False).head(
+            escolhidos = candidatos_contrario.sort_values(
+                by=['Gap', 'ProbSegundo'], ascending=[True, False]
+            ).head(
                 policy["max_contrarios"]
             )
             for idx_contrario in escolhidos.index:
                 df.loc[idx_contrario, 'Aposta'] = top2_labels[idx_contrario][1]
+                df.loc[idx_contrario, 'ContrarioAplicado'] = True
+                df.loc[idx_contrario, 'Motivo'] = (
+                    "Antipulverizacao: Gap {:.3f}; favorito {:.2f}; segundo {:.2f}".format(
+                        df.loc[idx_contrario, 'Gap'],
+                        p_max[idx_contrario],
+                        second_best[idx_contrario],
+                    )
+                )
                 logging.info(
                     "Aplicando antipulverização no jogo %s (favorito %.2f, segundo %.2f).",
                     idx_contrario,

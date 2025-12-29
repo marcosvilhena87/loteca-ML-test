@@ -12,6 +12,6 @@ def test_preprocess_creates_probability_columns(tmp_path):
     process(input_file, output_file)
 
     df = pd.read_csv(output_file, delimiter=';', decimal='.')
-    for col in ['P(1)', 'P(X)', 'P(2)', 'Form_Diff_Last5', 'Is_Home', 'Home_Fav', 'Market_vs_Form']:
+    for col in ['P(1)', 'P(X)', 'P(2)', 'Form_Diff_Last5', 'Is_Home', 'Home_Fav', 'Market_vs_Form', 'Prob_Gap']:
         assert col in df.columns
     assert 'Resultado' in df.columns

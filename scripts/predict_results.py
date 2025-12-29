@@ -48,8 +48,10 @@ def predict(input_file, model_file, scaler_file, output_file):
 
         logging.info("Calculando entropia para determinar os jogos mais incertos...")
         df['Entropia'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
+        df['Pmax_Modelo'] = probabilities.max(axis=1)
+        df['Score_Duplo'] = df['Entropia'] * (1 - df['Pmax_Modelo'])
 
-        jogos_duplos_idxs = df.nlargest(5, 'Entropia').index
+        jogos_duplos_idxs = df.nlargest(5, 'Score_Duplo').index
         logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")
 
         logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")

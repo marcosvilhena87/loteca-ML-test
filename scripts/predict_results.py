@@ -165,7 +165,7 @@ def predict(input_file, model_file, output_file):
 
             if pred_ganhadores >= 50:
                 base_policy.update({
-                    "n_duplos": 6,
+                    "n_duplos": 5,
                     "gap_threshold": 0.14,
                     "min_second_best": 0.28,
                 })

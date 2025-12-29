@@ -144,6 +144,7 @@ def predict(input_file, model_file, output_file):
                 return {
                     "n_duplos": 5,
                     "gap_threshold": 0.12,
+                    "min_second_best_duplo": 0.25,
                     "max_contrarios": 1,
                     "contrario_range": (0.50, 0.58),
                     "min_second_best": 0.30,
@@ -152,6 +153,7 @@ def predict(input_file, model_file, output_file):
                 return {
                     "n_duplos": 6,
                     "gap_threshold": 0.14,
+                    "min_second_best_duplo": 0.25,
                     "max_contrarios": 2,
                     "contrario_range": (0.48, 0.62),
                     "min_second_best": 0.28,
@@ -160,6 +162,7 @@ def predict(input_file, model_file, output_file):
                 return {
                     "n_duplos": 5,
                     "gap_threshold": 0.10,
+                    "min_second_best_duplo": 0.25,
                     "max_contrarios": 0,
                     "contrario_range": (0.0, 0.0),
                     "min_second_best": 1.0,
@@ -167,6 +170,7 @@ def predict(input_file, model_file, output_file):
             return {
                 "n_duplos": 5,
                 "gap_threshold": 0.12,
+                "min_second_best_duplo": 0.25,
                 "max_contrarios": 1,
                 "contrario_range": (0.50, 0.58),
                 "min_second_best": 0.30,
@@ -175,17 +179,33 @@ def predict(input_file, model_file, output_file):
         policy = _policy_from_pulverization(pred_ganhadores14)
 
         n_duplos = policy["n_duplos"]
-        mask_equilibrado = (df['Gap'] <= policy["gap_threshold"]) & (p_max < 0.55)
+        min_second_best_duplo = policy["min_second_best_duplo"]
+        absolute_gap_limit = 0.18
+
+        mask_equilibrado = (
+            (df['Gap'] <= policy["gap_threshold"]) &
+            (df['ProbSegundo'] >= min_second_best_duplo) &
+            (p_max < 0.55)
+        )
         candidatos_duplo = df[mask_equilibrado].sort_values(by='Gap')
         if len(candidatos_duplo) < n_duplos:
             logging.info(
-                "Menos de %s jogos com gap <= %.2f. Completando com menores gaps restantes.",
+                "Menos de %s jogos com gap <= %.2f e segundo favorito >= %.2f."
+                " Buscando gaps adicionais abaixo de %.2f.",
                 n_duplos,
                 policy["gap_threshold"],
+                min_second_best_duplo,
+                absolute_gap_limit,
             )
             faltantes = n_duplos - len(candidatos_duplo)
-            restantes = df[~df.index.isin(candidatos_duplo.index)].sort_values(by='Gap')
-            candidatos_duplo = pd.concat([candidatos_duplo, restantes.head(faltantes)])
+            restantes = df[~df.index.isin(candidatos_duplo.index)]
+            restantes = restantes[
+                (restantes['Gap'] <= absolute_gap_limit)
+                & (restantes['ProbSegundo'] >= min_second_best_duplo)
+                & (restantes['ProbFavorito'] < 0.55)
+            ].sort_values(by='Gap')
+            adicionais = restantes.head(faltantes)
+            candidatos_duplo = pd.concat([candidatos_duplo, adicionais])
         jogos_duplos_idxs = candidatos_duplo.head(min(n_duplos, len(df))).index
 
         expected_games = 14

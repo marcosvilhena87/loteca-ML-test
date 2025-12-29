@@ -8,7 +8,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupKFold, train_test_split
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -148,28 +148,61 @@ def train(input_file, model_file):
         rf_labels = list(rf_model.classes_)
         _log_metrics("RandomForest", y_test, rf_proba_test, rf_labels)
 
-        # Modelo principal: Regressão Logística Multinomial com calibração
-        logging.info("Treinando Regressão Logística Multinomial com calibração (isotonic)...")
+        # Modelo principal: Regressão Logística Multinomial (sem calibração)
+        logging.info("Treinando Regressão Logística Multinomial sem calibração...")
         log_reg = LogisticRegression(
             max_iter=1000,
-            multi_class='multinomial',
             n_jobs=-1,
             solver='lbfgs',
         )
-        calibrated_model = CalibratedClassifierCV(
-            estimator=log_reg,
-            method='isotonic',
-            cv=3,
-            n_jobs=-1,
-        )
-        calibrated_model.fit(X_train, y_train)
-        calibrated_proba_test = calibrated_model.predict_proba(X_test)
-        calibrated_labels = list(calibrated_model.classes_)
-        _log_metrics("LogisticRegression + calibration", y_test, calibrated_proba_test, calibrated_labels)
+        log_reg.fit(X_train, y_train)
+        log_reg_proba_test = log_reg.predict_proba(X_test)
+        log_reg_labels = list(log_reg.classes_)
+        _log_metrics("LogisticRegression", y_test, log_reg_proba_test, log_reg_labels)
 
-        # Salvando o modelo calibrado
-        logging.info("Salvando modelo calibrado em %s...", model_file)
-        dump(calibrated_model, model_file)
+        # Calibração opcional com Platt (sigmoid) respeitando grupos de Concurso
+        calibrated_model = None
+        if 'Concurso' in df_train.columns and df_train['Concurso'].notna().nunique() >= 2:
+            n_groups = df_train['Concurso'].nunique()
+            n_splits = min(3, n_groups)
+            if n_splits >= 2:
+                logging.info(
+                    "Treinando calibração Platt (sigmoid) com GroupKFold (%s splits) por Concurso...",
+                    n_splits,
+                )
+                group_cv = GroupKFold(n_splits=n_splits)
+                calibrated_model = CalibratedClassifierCV(
+                    estimator=LogisticRegression(max_iter=1000, n_jobs=-1, solver='lbfgs'),
+                    method='sigmoid',
+                    cv=group_cv,
+                    n_jobs=-1,
+                )
+                calibrated_model.fit(X_train, y_train, groups=df_train['Concurso'])
+                calibrated_proba_test = calibrated_model.predict_proba(X_test)
+                calibrated_labels = list(calibrated_model.classes_)
+                _log_metrics(
+                    "LogisticRegression + calibração sigmoid (GroupKFold)",
+                    y_test,
+                    calibrated_proba_test,
+                    calibrated_labels,
+                )
+            else:
+                logging.warning(
+                    "Calibração sigmoid ignorada: são necessários ao menos 2 grupos distintos em 'Concurso'.",
+                )
+        elif 'Concurso' not in df_train.columns:
+            logging.warning(
+                "Calibração sigmoid ignorada: coluna 'Concurso' ausente para definição de grupos.",
+            )
+        else:
+            logging.warning(
+                "Calibração sigmoid ignorada: menos de 2 concursos distintos disponíveis.",
+            )
+
+        # Salvando o melhor modelo disponível
+        model_to_save = calibrated_model if calibrated_model is not None else log_reg
+        logging.info("Salvando modelo em %s...", model_file)
+        dump(model_to_save, model_file)
 
         logging.info("Treinamento concluído com sucesso!")
     

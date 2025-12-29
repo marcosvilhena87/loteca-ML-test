@@ -10,6 +10,40 @@ from scripts.train_model import FEATURE_COLUMNS
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
+H2H_MAP = {"V": 3, "E": 1, "D": 0}
+H2H_RES = {"V": 1, "E": 0, "D": -1}
+
+
+def _parse_h2h_sequence(seq: object, expected_len: int = 5):
+    """Parse sequences como 'E-V-V-V-D' e retorna contagens/pontos estáveis."""
+    if pd.isna(seq) or str(seq).strip() == "":
+        return {
+            "h2h_has": 0,
+            "h2h_w": 0,
+            "h2h_d": 0,
+            "h2h_l": 0,
+            "h2h_pts": 0,
+            "h2h_last": 0,
+        }
+
+    parts = [p.strip().upper() for p in str(seq).split("-") if p.strip() != ""]
+    parts = parts[:expected_len]
+
+    w = sum(1 for p in parts if p == "V")
+    d = sum(1 for p in parts if p == "E")
+    l = sum(1 for p in parts if p == "D")
+    pts = sum(H2H_MAP.get(p, 0) for p in parts)
+    last = H2H_RES.get(parts[0], 0) if parts else 0
+
+    return {
+        "h2h_has": 1,
+        "h2h_w": w,
+        "h2h_d": d,
+        "h2h_l": l,
+        "h2h_pts": pts,
+        "h2h_last": last,
+    }
+
 def _ensure_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Garante que todas as colunas de features existam e estejam na ordem correta."""
     missing_cols = [col for col in FEATURE_COLUMNS if col not in df.columns]
@@ -80,6 +114,23 @@ def predict(input_file, model_file, output_file):
         df['entropy'] = -np.sum((probs + epsilon) * np.log(probs + epsilon), axis=1)
         if 'overround' not in df.columns:
             df['overround'] = probs.sum(axis=1)
+
+        # Features H2H (mandante e visitante)
+        for side, col in [("m", "last-5-h2h-mandante"), ("v", "last-5-h2h-visitante")]:
+            if col not in df.columns:
+                df[col] = np.nan
+
+            parsed = df[col].apply(_parse_h2h_sequence).apply(pd.Series)
+
+            df[f"h2h_{side}_has"] = parsed["h2h_has"].astype(int)
+            df[f"h2h_{side}_w5"] = parsed["h2h_w"].astype(int)
+            df[f"h2h_{side}_e5"] = parsed["h2h_d"].astype(int)
+            df[f"h2h_{side}_d5"] = parsed["h2h_l"].astype(int)
+            df[f"h2h_{side}_pts5"] = parsed["h2h_pts"].astype(int)
+            df[f"h2h_{side}_last"] = parsed["h2h_last"].astype(int)
+
+        df["h2h_pts_diff"] = df["h2h_m_pts5"] - df["h2h_v_pts5"]
+        df["h2h_has_both"] = (df["h2h_m_has"] & df["h2h_v_has"]).astype(int)
 
         # Carregando o modelo calibrado
         logging.info("Carregando modelo de predição...")

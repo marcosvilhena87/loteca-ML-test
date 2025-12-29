@@ -21,6 +21,20 @@ FEATURE_COLUMNS: List[str] = [
     'gap12',
     'entropy',
     'overround',
+    'h2h_m_has',
+    'h2h_m_w5',
+    'h2h_m_e5',
+    'h2h_m_d5',
+    'h2h_m_pts5',
+    'h2h_m_last',
+    'h2h_v_has',
+    'h2h_v_w5',
+    'h2h_v_e5',
+    'h2h_v_d5',
+    'h2h_v_pts5',
+    'h2h_v_last',
+    'h2h_pts_diff',
+    'h2h_has_both',
 ]
 
 

@@ -32,9 +32,14 @@ python main.py
 ```
 
 The script processes the raw data, trains a `RandomForestClassifier` (for evaluation only) and writes predictions to
-`output/predictions.csv`. The final bets are built directly from the bookmaker probabilities: the "seco" pick is the
-argmax of `P(1)`, `P(X)`, `P(2)`, and the five "duplos" are assigned to the matches with the highest entropy based on
-those same probabilities (using the two largest values in each case).
+`output/predictions.csv`. The final bets follow a bookmaker-only, risk-controlled rule set:
+
+- **Secos**: keep the favorite whenever its probability is at least 0.55.
+- **Duplos**: pick five games whose top-two probabilities differ by at most 0.12 (favoring the smallest gaps first);
+  if there are not enough balanced games, fill the remaining duplos with the next smallest gaps. Each duplo uses the
+  two highest bookmaker probabilities.
+- **Antipulverização opcional**: if available, swap exactly one seco (that is not a duplo) for the second-highest
+  outcome when the favorite is moderate (between 0.50 and 0.58) and the runner-up probability is at least 0.30.
 
 ## Running individual steps
 

@@ -70,84 +70,78 @@ def predict(input_file, model_file, output_file):
         df['Probabilidade (X)'] = np.round(normalized_probs[:, 1], 5)
         df['Probabilidade (2)'] = np.round(normalized_probs[:, 2], 5)
 
-        # Seco = classe com maior probabilidade do bookmaker
         class_labels = ['1', 'X', '2']
-        seco_indices = normalized_probs.argmax(axis=1)
+
+        # Identificação do favorito e do segundo favorito em cada jogo
+        top2_indices = np.argsort(normalized_probs, axis=1)[:, ::-1][:, :2]
+        top2_probs = np.take_along_axis(normalized_probs, top2_indices, axis=1)
+        top2_labels = [[class_labels[i] for i in row] for row in top2_indices]
+
+        p_max = top2_probs[:, 0]
+        second_best = top2_probs[:, 1]
+        df['ProbFavorito'] = np.round(p_max, 5)
+        df['ProbSegundo'] = np.round(second_best, 5)
+        df['Top2'] = [", ".join(labels) for labels in top2_labels]
+
+        # Regra 1: secos mantêm o favorito quando ele é forte
+        seco_indices = top2_indices[:, 0]
         df['Seco'] = [class_labels[i] for i in seco_indices]
 
         # Adicionando um valor pequeno para evitar problemas com log(0)
         epsilon = 1e-10
         adjusted_probabilities = np.clip(normalized_probs, epsilon, 1.0)
 
-        # Calculando a entropia com as probabilidades ajustadas
-        logging.info("Calculando entropia (com base no bookmaker) para determinar os jogos mais incertos...")
+        # Mantemos a entropia para inspeção, embora a seleção siga as novas regras
+        logging.info("Calculando entropia (com base no bookmaker) para registrar incerteza...")
         df['Entropia'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
 
-        # Labels mais prováveis para cada jogo
-        top2_indices = np.argsort(adjusted_probabilities, axis=1)[:, -2:][:, ::-1]
-        top2_labels = []
-        for idxs in top2_indices:
-            seen = set()
-            ordered_labels = []
-            for idx in idxs:
-                label = class_labels[idx]
-                if label not in seen:
-                    ordered_labels.append(label)
-                    seen.add(label)
-
-            if len(ordered_labels) < 2:
-                fallback_label = next(label for label in class_labels if label not in seen)
-                ordered_labels.append(fallback_label)
-
-            top2_labels.append(ordered_labels)
-
-        df['Top2'] = [", ".join(labels) for labels in top2_labels]
-
         # Calculando o "gap" entre as duas maiores probabilidades
-        prob_sorted = np.sort(adjusted_probabilities, axis=1)[:, ::-1]
-        df['Gap'] = prob_sorted[:, 0] - prob_sorted[:, 1]
+        df['Gap'] = p_max - second_best
 
-        # Identificar os jogos mais incertos (menor gap, desempate por maior entropia)
+        # Regra 2: selecionar duplos apenas em jogos equilibrados (gap <= 0.12)
         n_duplos = 5
-        jogos_ordenados = df.sort_values(by=['Gap', 'Entropia'], ascending=[True, False])
-        rank_duplo = pd.Series(range(1, len(jogos_ordenados) + 1), index=jogos_ordenados.index)
-        df['RankDuplo'] = rank_duplo.reindex(df.index)
-        jogos_duplos_idxs = jogos_ordenados.head(min(n_duplos, len(df))).index
-        if len(df) < n_duplos:
-            logging.warning(
-                "Menos jogos do que o esperado. Aplicando duplos em todos: "
-                f"{len(df)} jogos disponíveis para {n_duplos} duplos."
+        mask_equilibrado = (df['Gap'] <= 0.12) & (p_max < 0.55)
+        candidatos_duplo = df[mask_equilibrado].sort_values(by='Gap')
+        if len(candidatos_duplo) < n_duplos:
+            logging.info(
+                "Menos de %s jogos com gap <= 0.12. Completando com menores gaps restantes.",
+                n_duplos,
             )
-        else:
-            logging.info(f"Aplicando exatamente {n_duplos} duplos com base no gap.")
+            faltantes = n_duplos - len(candidatos_duplo)
+            restantes = df[~df.index.isin(candidatos_duplo.index)].sort_values(by='Gap')
+            candidatos_duplo = pd.concat([candidatos_duplo, restantes.head(faltantes)])
+        jogos_duplos_idxs = candidatos_duplo.head(min(n_duplos, len(df))).index
 
         expected_games = 14
         if len(df) != expected_games:
             logging.warning(
                 f"Quantidade de jogos diferente do esperado ({expected_games}). Encontrados {len(df)} registros."
             )
-        logging.info(
-            "Índices dos jogos selecionados para duplos (gap + entropia): "
-            f"{jogos_duplos_idxs.tolist()}"
-        )
 
-        if len(jogos_duplos_idxs) != n_duplos:
-            logging.warning(
-                f"Total de duplos gerados: {len(jogos_duplos_idxs)} (configurado: {n_duplos})."
-            )
-        logging.info(
-            "Distribuição planejada: %s secos e %s duplos.",
-            len(df) - len(jogos_duplos_idxs),
-            len(jogos_duplos_idxs)
-        )
-
-        # Gerar a coluna "Aposta"
-        logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
-        df['Aposta'] = df['Seco']  # Copia as apostas secas inicialmente
-
-        # Escolhendo os "duplos" para os 5 jogos mais incertos
+        # Regra 3: antipulverização controlada (1 contrário opcional)
+        df['Aposta'] = df['Seco']
+        if len(jogos_duplos_idxs) > 0:
+            logging.info("Aplicando duplos a %s jogos conforme regra de gap.", len(jogos_duplos_idxs))
         for idx in jogos_duplos_idxs:
             df.loc[idx, 'Aposta'] = df.loc[idx, 'Top2']
+
+        candidatos_contrario = df.loc[
+            (~df.index.isin(jogos_duplos_idxs))
+            & (p_max >= 0.50)
+            & (p_max <= 0.58)
+            & (second_best >= 0.30)
+        ]
+
+        if not candidatos_contrario.empty:
+            escolhido = candidatos_contrario.sort_values(by='ProbSegundo', ascending=False)
+            idx_contrario = escolhido.index[0]
+            df.loc[idx_contrario, 'Aposta'] = top2_labels[idx_contrario][1]
+            logging.info(
+                "Aplicando antipulverização no jogo %s (favorito %.2f, segundo %.2f).",
+                idx_contrario,
+                p_max[idx_contrario],
+                second_best[idx_contrario],
+            )
 
         # Salvando as predições no arquivo
         logging.info(f"Salvando predições no arquivo {output_file}...")

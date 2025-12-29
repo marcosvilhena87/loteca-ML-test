@@ -162,8 +162,8 @@ def train(input_file, model_file):
 
         # Calibração opcional com Platt (sigmoid) respeitando grupos de Concurso
         calibrated_model = None
-        if 'Concurso' in df_train.columns and df_train['Concurso'].notna().nunique() >= 2:
-            n_groups = df_train['Concurso'].nunique()
+        if 'Concurso' in df_train.columns and df_train['Concurso'].nunique(dropna=True) >= 2:
+            n_groups = df_train['Concurso'].nunique(dropna=True)
             n_splits = min(3, n_groups)
             if n_splits >= 2:
                 logging.info(

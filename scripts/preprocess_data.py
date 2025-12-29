@@ -161,6 +161,9 @@ def process(input_file: str, output_file: str, rateio_file: Optional[str] = None
         df['gap12'] = sorted_probs[:, 2] - sorted_probs[:, 1]
         epsilon = 1e-10
         df['entropy'] = -np.sum((probs + epsilon) * np.log(probs + epsilon), axis=1)
+        df['log_odds_1x'] = np.log((df['P(1)'] + epsilon) / (df['P(X)'] + epsilon))
+        df['log_odds_12'] = np.log((df['P(1)'] + epsilon) / (df['P(2)'] + epsilon))
+        df['log_odds_x2'] = np.log((df['P(X)'] + epsilon) / (df['P(2)'] + epsilon))
 
         # Features H2H (mandante e visitante)
         for side, col in [("m", "last-5-h2h-mandante"), ("v", "last-5-h2h-visitante")]:
@@ -197,6 +200,22 @@ def process(input_file: str, output_file: str, rateio_file: Optional[str] = None
                     "%s concursos ficaram sem informações de rateio após o merge (campos permanecerão NaN).",
                     missing,
                 )
+
+        # Garantir que colunas de rateio existam mesmo sem merge
+        if 'log_rateio_14' not in df.columns:
+            df['log_rateio_14'] = np.nan
+        if 'jackpot_14' not in df.columns:
+            df['jackpot_14'] = np.nan
+        if 'rollover_streak' not in df.columns:
+            df['rollover_streak'] = np.nan
+
+        # Imputação simples para evitar NaNs no treino
+        rateio_median = df['log_rateio_14'].median()
+        if pd.isna(rateio_median):
+            rateio_median = 0.0
+        df['log_rateio_14'] = df['log_rateio_14'].fillna(rateio_median)
+        df['jackpot_14'] = df['jackpot_14'].fillna(0).astype(int)
+        df['rollover_streak'] = df['rollover_streak'].fillna(0).astype(int)
 
         # Salvar o arquivo processado
         logging.info(f"Salvando o arquivo processado em {output_file}...")

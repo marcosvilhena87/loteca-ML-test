@@ -35,9 +35,10 @@ The script processes the raw data, trains a `RandomForestClassifier` (for evalua
 `output/predictions.csv`. The final bets follow a bookmaker-only, risk-controlled rule set:
 
 - **Secos**: keep the favorite whenever its probability is at least 0.55.
-- **Duplos**: pick five games whose top-two probabilities differ by at most 0.12 (favoring the smallest gaps first);
-  if there are not enough balanced games, fill the remaining duplos with the next smallest gaps. Each duplo uses the
-  two highest bookmaker probabilities.
+- **Duplos**: pick five games only when the favorite and runner-up are close **and** the runner-up has at least 0.25
+  probability. The primary filter is a small gap (≤ 0.12) plus `ProbSegundo ≥ 0.25`; if that yields fewer than five,
+  only games with gap < 0.18 (still with `ProbSegundo ≥ 0.25`) are added. Any remaining slots stay as secos to avoid
+  artificial pulverization. Each duplo uses the two highest bookmaker probabilities.
 - **Antipulverização opcional**: if available, swap exactly one seco (that is not a duplo) for the second-highest
   outcome when the favorite is moderate (between 0.50 and 0.58) and the runner-up probability is at least 0.30.
 

@@ -1,4 +1,5 @@
 import logging
+import numpy as np
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO,
@@ -51,6 +52,32 @@ def process(input_file, output_file):
                                                    '2' if row['[2]'] == 1 else None, axis=1)
         else:
             raise KeyError("As colunas '[1]', '[x]' e '[2]' são necessárias para calcular o resultado.")
+
+        # Calcular features derivadas das probabilidades
+        logging.info("Criando features derivadas das probabilidades...")
+        probabilities = df[['P(1)', 'P(X)', 'P(2)']].to_numpy(dtype=float)
+
+        p_max = probabilities.max(axis=1)
+        sorted_probs = np.sort(probabilities, axis=1)
+        p_second = sorted_probs[:, -2]
+        gap = p_max - p_second
+
+        epsilon = 1e-12
+        adjusted = np.clip(probabilities, epsilon, 1.0 - epsilon)
+        entropy = -np.sum(adjusted * np.log(adjusted), axis=1)
+
+        log_odds = np.log(adjusted / (1 - adjusted))
+
+        df['Pmax'] = p_max
+        df['Psecond'] = p_second
+        df['Gap'] = gap
+        df['Entropy'] = entropy
+        df['LogOdds_1'] = log_odds[:, 0]
+        df['LogOdds_X'] = log_odds[:, 1]
+        df['LogOdds_2'] = log_odds[:, 2]
+        df['DrawBias'] = df['P(X)']
+        df['DrawEntropyInteraction'] = df['P(X)'] * entropy
+        df['DrawGapInteraction'] = df['P(X)'] * gap
 
         # Remover linhas inválidas
         logging.info("Removendo linhas inválidas...")

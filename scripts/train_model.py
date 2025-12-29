@@ -29,9 +29,19 @@ def train(input_file, model_file):
         logging.info("Carregando os dados de entrada...")
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
 
-        # Selecionando as features (probabilidades) e o target (resultado real)
+        # Selecionando features enriquecidas e o target (resultado real)
         logging.info("Selecionando as features e o target...")
-        X = df[['P(1)', 'P(X)', 'P(2)']]  # Features
+        feature_cols = [
+            'P(1)', 'P(X)', 'P(2)',
+            'Pmax', 'Psecond', 'Gap', 'Entropy',
+            'LogOdds_1', 'LogOdds_X', 'LogOdds_2',
+            'DrawBias', 'DrawEntropyInteraction', 'DrawGapInteraction'
+        ]
+        missing = [col for col in feature_cols if col not in df.columns]
+        if missing:
+            raise KeyError(f"Colunas de features ausentes no dataset processado: {missing}")
+
+        X = df[feature_cols]
         y = df['Resultado']  # Target: 1, X ou 2
 
         # Dividindo os dados em treino e teste

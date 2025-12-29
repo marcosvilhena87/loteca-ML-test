@@ -12,6 +12,11 @@ def test_preprocess_creates_probability_columns(tmp_path):
     process(input_file, output_file)
 
     df = pd.read_csv(output_file, delimiter=';', decimal='.')
-    assert 'P(1)' in df.columns
-    assert 'P(X)' in df.columns
-    assert 'P(2)' in df.columns
+    expected_columns = [
+        'P(1)', 'P(X)', 'P(2)',
+        'Pmax', 'Psecond', 'Gap', 'Entropy',
+        'LogOdds_1', 'LogOdds_X', 'LogOdds_2',
+        'DrawBias', 'DrawEntropyInteraction', 'DrawGapInteraction'
+    ]
+    for col in expected_columns:
+        assert col in df.columns

@@ -3,7 +3,7 @@ from typing import List
 
 import numpy as np
 import pandas as pd
-from joblib import load  # Para carregar os modelos previamente treinados
+from joblib import load
 
 from scripts.train_model import FEATURE_COLUMNS
 
@@ -18,7 +18,7 @@ def _ensure_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[FEATURE_COLUMNS]
 
 
-def predict(input_file, model_file, scaler_file, output_file):
+def predict(input_file, model_file, output_file):
     """Generate predictions for future games and write them to CSV.
 
     Parameters
@@ -27,8 +27,6 @@ def predict(input_file, model_file, scaler_file, output_file):
         CSV file with upcoming games and odds or probabilities.
     model_file : str
         Path of the trained model to load.
-    scaler_file : str
-        Path of the scaler used during training.
     output_file : str
         Destination path for the predictions CSV.
 
@@ -74,20 +72,19 @@ def predict(input_file, model_file, scaler_file, output_file):
         if 'overround' not in df.columns:
             df['overround'] = probs.sum(axis=1)
 
-        # Carregando o modelo e o scaler
-        logging.info("Carregando modelo e scaler...")
-        model = load(model_file)
-        scaler = load(scaler_file)
+        # Carregando o pipeline completo
+        logging.info("Carregando pipeline de modelagem...")
+        pipeline = load(model_file)
+        model = pipeline.named_steps.get('model', pipeline)
 
         # Selecionando as features para predição e escalando
         logging.info("Preparando dados para predição...")
         feature_frame = _ensure_feature_columns(df)
-        X_future_scaled = scaler.transform(feature_frame)
 
         # Gerando as predições
         logging.info("Gerando predições...")
-        probabilities = model.predict_proba(X_future_scaled)
-        predictions = model.predict(X_future_scaled)
+        probabilities = pipeline.predict_proba(feature_frame)
+        predictions = pipeline.predict(feature_frame)
         class_labels = list(model.classes_)
 
         # Adicionando as predições ao DataFrame
@@ -112,16 +109,19 @@ def predict(input_file, model_file, scaler_file, output_file):
         duplo_prob = top_two_sorted.sum(axis=1)
         ganho_marginal = duplo_prob - seco_prob
 
-        # Fator de rateio heurístico
-        favoritismo_medio = df['pmax'].mean()
-        fator_rateio_heuristico = 1.3 if favoritismo_medio < 0.55 else 1.0
-        if 'jackpot_14' in df.columns:
-            jackpot_flag = df['jackpot_14'].eq(True)
-            fator_rateio = np.where(jackpot_flag, 1.3, fator_rateio_heuristico)
-        else:
-            fator_rateio = fator_rateio_heuristico
+        # Fator de payout contínuo baseado em incerteza e rollover
+        entropy_norm = df['entropy'] / np.log(3)
+        underdog_bonus = (0.6 - df['pmax']).clip(lower=0) * 0.8
+        volatilidade_bonus = entropy_norm * 0.5
+        payout_prior = 1.0 + underdog_bonus + volatilidade_bonus
 
-        score_ev = ganho_marginal * fator_rateio
+        if 'rollover_streak' in df.columns:
+            payout_prior *= 1 + 0.03 * df['rollover_streak'].fillna(0).clip(upper=20)
+        if 'log_rateio_14' in df.columns:
+            median_rateio = df['log_rateio_14'].median()
+            payout_prior *= 1 + 0.05 * (df['log_rateio_14'].fillna(median_rateio) - median_rateio)
+
+        score_ev = ganho_marginal * payout_prior
         jogos_duplos_idxs = pd.Series(score_ev).nlargest(5).index
         logging.info(f"Índices selecionados para duplos: {jogos_duplos_idxs.tolist()}")
 

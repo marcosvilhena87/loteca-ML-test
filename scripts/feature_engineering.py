@@ -15,11 +15,11 @@ MARKET_MAP = {'P(1)': 1, 'P(X)': 0, 'P(2)': -1}
 
 # Features consumed by the model
 MODEL_FEATURES = [
-    'P(1)', 'P(X)', 'P(2)',
     'Form_Diff_Last5',
     'Is_Home',
     'Home_Fav',
     'Market_vs_Form',
+    'Prob_Gap',
 ]
 
 
@@ -83,4 +83,5 @@ def add_domain_features(df: pd.DataFrame) -> pd.DataFrame:
     market_fav = df[PROB_COLUMNS].idxmax(axis=1)
     df['Market_Signal'] = market_fav.map(MARKET_MAP).fillna(0)
     df['Market_vs_Form'] = df['Market_Signal'] * df['Form_Diff_Last5']
+    df['Prob_Gap'] = df[PROB_COLUMNS].max(axis=1) - df[PROB_COLUMNS].median(axis=1)
     return df

@@ -1,7 +1,9 @@
 import logging
+import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import log_loss
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from joblib import dump  # Usando joblib para salvar os modelos
 
@@ -35,8 +37,17 @@ def train(input_file, model_file, scaler_file):
         model = RandomForestClassifier(random_state=42, n_estimators=100, max_depth=None)
         model.fit(X_train_scaled, y_train)
 
+        logging.info("Calculando métricas de avaliação...")
+        y_test_proba = model.predict_proba(X_test_scaled)
         accuracy = model.score(X_test_scaled, y_test)
+        logloss = log_loss(y_test, y_test_proba, labels=model.classes_)
+
+        true_one_hot = pd.get_dummies(y_test).reindex(columns=model.classes_, fill_value=0).values
+        brier = np.mean(np.sum((true_one_hot - y_test_proba) ** 2, axis=1))
+
         logging.info(f"Acurácia no conjunto de teste: {accuracy:.4f}")
+        logging.info(f"Log loss no conjunto de teste: {logloss:.4f}")
+        logging.info(f"Brier score (multi-classe) no conjunto de teste: {brier:.4f}")
 
         logging.info(f"Salvando o modelo em {model_file} e o scaler em {scaler_file}...")
         dump(model, model_file)

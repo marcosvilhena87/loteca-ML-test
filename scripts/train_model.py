@@ -146,7 +146,13 @@ def train(input_file, model_file):
         log_reg.fit(X_train, y_train)
         log_reg_proba_test = log_reg.predict_proba(X_test)
         log_reg_labels = list(log_reg.classes_)
-        _log_metrics("LogisticRegression", y_test, log_reg_proba_test, log_reg_labels)
+        log_reg_logloss, _, _ = _log_metrics(
+            "LogisticRegression", y_test, log_reg_proba_test, log_reg_labels
+        )
+
+        # Modelo padrão a ser salvo (não calibrado, salvo se a calibração trouxer ganho real)
+        best_model = log_reg
+        best_logloss = log_reg_logloss
 
         # Calibração opcional com holdout por Concurso usando prefit
         calibrated_model = None
@@ -189,12 +195,27 @@ def train(input_file, model_file):
 
                     calibrated_proba_test = calibrated_model.predict_proba(X_test)
                     calibrated_labels = list(calibrated_model.classes_)
-                    _log_metrics(
+                    calibrated_logloss, _, _ = _log_metrics(
                         "LogisticRegression + calibração sigmoid (holdout)",
                         y_test,
                         calibrated_proba_test,
                         calibrated_labels,
                     )
+
+                    if calibrated_logloss < best_logloss:
+                        logging.info(
+                            "Calibração manteve ou melhorou o LogLoss (%.4f -> %.4f); modelo calibrado selecionado.",
+                            best_logloss,
+                            calibrated_logloss,
+                        )
+                        best_model = calibrated_model
+                        best_logloss = calibrated_logloss
+                    else:
+                        logging.info(
+                            "Calibração não trouxe ganho de LogLoss (%.4f vs %.4f); mantendo modelo não calibrado.",
+                            calibrated_logloss,
+                            best_logloss,
+                        )
             elif 'Concurso' not in df_train.columns:
                 logging.warning(
                     "Calibração sigmoid ignorada: coluna 'Concurso' ausente para definição de grupos.",
@@ -210,7 +231,7 @@ def train(input_file, model_file):
             calibrated_model = None
 
         # Salvando o melhor modelo disponível
-        model_to_save = calibrated_model if calibrated_model is not None else log_reg
+        model_to_save = best_model
         logging.info("Salvando modelo em %s...", model_file)
         dump(model_to_save, model_file)
 

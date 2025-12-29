@@ -8,7 +8,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss
-from sklearn.model_selection import GroupKFold, train_test_split
+from sklearn.model_selection import train_test_split
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -160,44 +160,61 @@ def train(input_file, model_file):
         log_reg_labels = list(log_reg.classes_)
         _log_metrics("LogisticRegression", y_test, log_reg_proba_test, log_reg_labels)
 
-        # Calibração opcional com Platt (sigmoid) respeitando grupos de Concurso
+        # Calibração opcional com holdout por Concurso usando prefit
         calibrated_model = None
-        if 'Concurso' in df_train.columns and df_train['Concurso'].nunique(dropna=True) >= 2:
-            n_groups = df_train['Concurso'].nunique(dropna=True)
-            n_splits = min(3, n_groups)
-            if n_splits >= 2:
-                logging.info(
-                    "Treinando calibração Platt (sigmoid) com GroupKFold (%s splits) por Concurso...",
-                    n_splits,
-                )
-                group_cv = GroupKFold(n_splits=n_splits)
-                calibrated_model = CalibratedClassifierCV(
-                    estimator=LogisticRegression(max_iter=1000, n_jobs=-1, solver='lbfgs'),
-                    method='sigmoid',
-                    cv=group_cv,
-                    n_jobs=-1,
-                )
-                calibrated_model.fit(X_train, y_train, groups=df_train['Concurso'])
-                calibrated_proba_test = calibrated_model.predict_proba(X_test)
-                calibrated_labels = list(calibrated_model.classes_)
-                _log_metrics(
-                    "LogisticRegression + calibração sigmoid (GroupKFold)",
-                    y_test,
-                    calibrated_proba_test,
-                    calibrated_labels,
+        try:
+            if 'Concurso' in df_train.columns and df_train['Concurso'].nunique(dropna=True) >= 2:
+                concursos_train = df_train['Concurso'].dropna().sort_values().unique()
+                n_cal = max(1, int(0.10 * len(concursos_train)))
+                concursos_cal = concursos_train[-n_cal:]
+
+                df_fit = df_train[~df_train['Concurso'].isin(concursos_cal)]
+                df_cal = df_train[df_train['Concurso'].isin(concursos_cal)]
+
+                if df_fit.empty or df_cal.empty:
+                    logging.warning(
+                        "Calibração sigmoid ignorada: divisão holdout por Concurso gerou subconjuntos vazios.",
+                    )
+                else:
+                    logging.info(
+                        "Treinando calibração Platt (sigmoid) com holdout de %s concursos.",
+                        df_cal['Concurso'].nunique(),
+                    )
+
+                    X_fit, y_fit = df_fit[FEATURE_COLUMNS], df_fit['Resultado']
+                    X_cal, y_cal = df_cal[FEATURE_COLUMNS], df_cal['Resultado']
+
+                    base = LogisticRegression(max_iter=1000, n_jobs=-1, solver='lbfgs')
+                    base.fit(X_fit, y_fit)
+
+                    calibrated_model = CalibratedClassifierCV(
+                        estimator=base,
+                        method='sigmoid',
+                        cv='prefit'
+                    )
+                    calibrated_model.fit(X_cal, y_cal)
+
+                    calibrated_proba_test = calibrated_model.predict_proba(X_test)
+                    calibrated_labels = list(calibrated_model.classes_)
+                    _log_metrics(
+                        "LogisticRegression + calibração sigmoid (holdout)",
+                        y_test,
+                        calibrated_proba_test,
+                        calibrated_labels,
+                    )
+            elif 'Concurso' not in df_train.columns:
+                logging.warning(
+                    "Calibração sigmoid ignorada: coluna 'Concurso' ausente para definição de grupos.",
                 )
             else:
                 logging.warning(
-                    "Calibração sigmoid ignorada: são necessários ao menos 2 grupos distintos em 'Concurso'.",
+                    "Calibração sigmoid ignorada: menos de 2 concursos distintos disponíveis.",
                 )
-        elif 'Concurso' not in df_train.columns:
+        except Exception as e:
             logging.warning(
-                "Calibração sigmoid ignorada: coluna 'Concurso' ausente para definição de grupos.",
+                "Falha na calibração; salvando modelo não calibrado. Erro: %s", e
             )
-        else:
-            logging.warning(
-                "Calibração sigmoid ignorada: menos de 2 concursos distintos disponíveis.",
-            )
+            calibrated_model = None
 
         # Salvando o melhor modelo disponível
         model_to_save = calibrated_model if calibrated_model is not None else log_reg

@@ -140,6 +140,13 @@ def predict(input_file, model_file, output_file):
         logging.info("Preparando dados para predição...")
         feature_frame = _ensure_feature_columns(df)
 
+        if hasattr(model, "n_features_in_") and model.n_features_in_ != feature_frame.shape[1]:
+            raise ValueError(
+                f"Modelo foi treinado com {model.n_features_in_} features, "
+                f"mas a predição recebeu {feature_frame.shape[1]}. "
+                "Apague o models/final_model.pkl e retreine."
+            )
+
         # Gerando as predições
         logging.info("Gerando predições...")
         probabilities = model.predict_proba(feature_frame)

@@ -10,6 +10,11 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss
 from sklearn.model_selection import train_test_split
 
+try:
+    from sklearn.frozen import FrozenEstimator
+except ImportError:  # Compatibilidade com versões mais antigas do sklearn
+    FrozenEstimator = None
+
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -17,24 +22,7 @@ FEATURE_COLUMNS: List[str] = [
     'P(1)',
     'P(X)',
     'P(2)',
-    'pmax',
-    'gap12',
-    'entropy',
     'overround',
-    'h2h_m_has',
-    'h2h_m_w5',
-    'h2h_m_e5',
-    'h2h_m_d5',
-    'h2h_m_pts5',
-    'h2h_m_last',
-    'h2h_v_has',
-    'h2h_v_w5',
-    'h2h_v_e5',
-    'h2h_v_d5',
-    'h2h_v_pts5',
-    'h2h_v_last',
-    'h2h_pts_diff',
-    'h2h_has_both',
 ]
 
 
@@ -187,11 +175,16 @@ def train(input_file, model_file):
                     base = LogisticRegression(max_iter=1000, n_jobs=-1, solver='lbfgs')
                     base.fit(X_fit, y_fit)
 
+                    estimator = FrozenEstimator(base) if FrozenEstimator is not None else base
                     calibrated_model = CalibratedClassifierCV(
-                        estimator=base,
+                        estimator=estimator,
                         method='sigmoid',
-                        cv='prefit'
+                        cv=5 if FrozenEstimator is not None else 'prefit'
                     )
+                    if FrozenEstimator is None:
+                        logging.warning(
+                            "sklearn.frozen indisponível; usando cv='prefit' (com aviso de deprecated)."
+                        )
                     calibrated_model.fit(X_cal, y_cal)
 
                     calibrated_proba_test = calibrated_model.predict_proba(X_test)

@@ -112,6 +112,9 @@ def predict(input_file, model_file, output_file):
         df['gap12'] = sorted_probs[:, 2] - sorted_probs[:, 1]
         epsilon = 1e-10
         df['entropy'] = -np.sum((probs + epsilon) * np.log(probs + epsilon), axis=1)
+        df['log_odds_1x'] = np.log((df['P(1)'] + epsilon) / (df['P(X)'] + epsilon))
+        df['log_odds_12'] = np.log((df['P(1)'] + epsilon) / (df['P(2)'] + epsilon))
+        df['log_odds_x2'] = np.log((df['P(X)'] + epsilon) / (df['P(2)'] + epsilon))
         if 'overround' not in df.columns:
             df['overround'] = probs.sum(axis=1)
 
@@ -131,6 +134,21 @@ def predict(input_file, model_file, output_file):
 
         df["h2h_pts_diff"] = df["h2h_m_pts5"] - df["h2h_v_pts5"]
         df["h2h_has_both"] = (df["h2h_m_has"] & df["h2h_v_has"]).astype(int)
+
+        # Garantir features de rateio mesmo quando não disponíveis
+        if 'log_rateio_14' not in df.columns:
+            df['log_rateio_14'] = np.nan
+        if 'jackpot_14' not in df.columns:
+            df['jackpot_14'] = np.nan
+        if 'rollover_streak' not in df.columns:
+            df['rollover_streak'] = np.nan
+
+        rateio_median = df['log_rateio_14'].median()
+        if pd.isna(rateio_median):
+            rateio_median = 0.0
+        df['log_rateio_14'] = df['log_rateio_14'].fillna(rateio_median)
+        df['jackpot_14'] = df['jackpot_14'].fillna(0).astype(int)
+        df['rollover_streak'] = df['rollover_streak'].fillna(0).astype(int)
 
         # Carregando o modelo calibrado
         logging.info("Carregando modelo de predição...")

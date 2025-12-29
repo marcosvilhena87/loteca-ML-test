@@ -110,6 +110,13 @@ def predict(input_file, model_file, output_file):
 
         # Regra 2: selecionar duplos apenas em jogos equilibrados (gap <= 0.12)
         concurso_features = calculate_concurso_features(df[['P(1)', 'P(X)', 'P(2)']])
+        aggregated_metrics = {
+            "mean_prob_favorito": float(concurso_features["mean_pmax"]),
+            "mean_entropy": float(concurso_features["mean_entropy"]),
+            "gap_std": float(concurso_features["std_gap"]),
+            "mean_gap": float(concurso_features["mean_gap"]),
+        }
+        logging.info("Métricas agregadas do concurso: %s", aggregated_metrics)
 
         models_dir = os.path.dirname(model_file) or ""
 
@@ -191,9 +198,57 @@ def predict(input_file, model_file, output_file):
 
         policy = _policy_from_pulverization(pred_ganhadores14, pred_rateio14)
 
+        def _apply_metric_overrides(policy_settings, metrics):
+            """Tweak the policy with contest-level risk signals."""
+            n_duplos_local = policy_settings["n_duplos"]
+            max_contrarios_local = policy_settings["max_contrarios"]
+            ajustes = []
+            freio_pulverizacao = False
+
+            entropy = metrics["mean_entropy"]
+            gap_std = metrics["gap_std"]
+            mean_pmax = metrics["mean_prob_favorito"]
+
+            if entropy >= 1.05:
+                n_duplos_local += 1
+                ajustes.append("entropia_alta")
+            elif entropy <= 0.95:
+                max_contrarios_local = max(0, max_contrarios_local - 1)
+                ajustes.append("entropia_baixa")
+
+            if gap_std >= 0.10:
+                n_duplos_local += 1
+                max_contrarios_local = max(0, max_contrarios_local - 1)
+                ajustes.append("desvio_gap_alto")
+
+            favorite_cap_threshold = 0.62
+            if mean_pmax > favorite_cap_threshold:
+                n_duplos_local = max(0, n_duplos_local - 1)
+                max_contrarios_local = 0
+                freio_pulverizacao = True
+                ajustes.append("teto_favoritos")
+
+            return {
+                "n_duplos": int(n_duplos_local),
+                "max_contrarios": int(max_contrarios_local),
+                "ajustes": ajustes,
+                "freio_pulverizacao": freio_pulverizacao,
+            }
+
+        override = _apply_metric_overrides(policy, aggregated_metrics)
+        policy["n_duplos"] = override["n_duplos"]
+        policy["max_contrarios"] = override["max_contrarios"]
+
         n_duplos = policy["n_duplos"]
         min_second_best_duplo = policy["min_second_best_duplo"]
         absolute_gap_limit = 0.18
+
+        logging.info(
+            "Política final após sinais de risco: n_duplos=%s, max_contrarios=%s, ajustes=%s",
+            n_duplos,
+            policy["max_contrarios"],
+            ", ".join(override["ajustes"]) if override["ajustes"] else "nenhum",
+        )
 
         mask_equilibrado = (
             (df['Gap'] <= policy["gap_threshold"]) &
@@ -268,6 +323,21 @@ def predict(input_file, model_file, output_file):
 
         df['PredGanhadores14'] = pred_ganhadores14
         df['PredRateio14'] = pred_rateio14
+        df['MetricMeanProbFavorito'] = aggregated_metrics["mean_prob_favorito"]
+        df['MetricMeanEntropy'] = aggregated_metrics["mean_entropy"]
+        df['MetricGapStd'] = aggregated_metrics["gap_std"]
+        df['MetricMeanGap'] = aggregated_metrics["mean_gap"]
+        df['FreioPulverizacao'] = override["freio_pulverizacao"]
+        df['AjustesPulverizacao'] = ", ".join(override["ajustes"]) if override["ajustes"] else "nenhum"
+        df['DuplosPlanejados'] = n_duplos
+        df['MaxContrariosPlanejado'] = policy["max_contrarios"]
+
+        if override["freio_pulverizacao"]:
+            logging.info(
+                "Freio de pulverização acionado: média favoritos=%.3f, duplos=%s, contrários zerados.",
+                aggregated_metrics["mean_prob_favorito"],
+                n_duplos,
+            )
 
         # Salvando as predições no arquivo
         logging.info(f"Salvando predições no arquivo {output_file}...")

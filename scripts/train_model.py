@@ -243,7 +243,7 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             "Backtest de cartões (modelo vs mercado) maximizando EV14 winsorizado:")
         for _, row in model_grid.iterrows():
             logging.info(
-                "alpha=%.2f | EV14 diff=%.2f (modelo=%.0f vs mercado=%.0f) | p14=%.3f vs mercado=%.3f | %>=13 modelo=%.1f (>=12=%.1f) vs mercado=%.1f (>=12=%.1f) | cobertura=%.2f | EH=%.2f | Penalidade=%.2f",
+                "alpha=%.2f | EV14 diff=%.2f (modelo=%.0f vs mercado=%.0f) | p14=%.3f vs mercado=%.3f | pct>=13 modelo=%.1f (>=12=%.1f) vs mercado=%.1f (>=12=%.1f) | cobertura=%.2f | EH=%.2f | Penalidade=%.2f",
                 row["alpha"],
                 row["ev14_diff"],
                 row["ev14_modelo"],
@@ -260,7 +260,7 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             )
 
         logging.info(
-            "Alpha ótimo=%.2f | Modelo: EV14=%.0f, p14=%.3f, %>=13=%.1f, %>=12=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV14=%.0f, p14=%.3f, %>=13=%.1f",
+            "Alpha ótimo=%.2f | Modelo: EV14=%.0f, p14=%.3f, pct>=13=%.1f, pct>=12=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV14=%.0f, p14=%.3f, pct>=13=%.1f",
             best_run["best_alpha"],
             ev_model,
             p14_model,

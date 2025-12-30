@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from joblib import load
 
-from .features import RatingEngine, compute_implied_probabilities, enrich_features
+from .features import (RatingEngine, compute_expert_differences,
+                       compute_implied_probabilities, enrich_features)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-DUO_ALPHA = 0.5
+DEFAULT_DUO_ALPHA = 0.5
 
 
 def _load_history(history_file: str) -> pd.DataFrame:
@@ -20,7 +21,8 @@ def _load_history(history_file: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def predict(input_file, model_file, scaler_file=None, output_file=None, history_file: str = "data/processed/loteca_treinamento.csv"):
+def predict(input_file, model_file, scaler_file=None, output_file=None, history_file: str = "data/processed/loteca_treinamento.csv",
+            duo_alpha: float = DEFAULT_DUO_ALPHA):
     """Generate predictions and rich diagnostics for future games."""
     try:
         logging.info("Carregando dados dos jogos futuros...")
@@ -43,7 +45,7 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
 
         logging.info("Gerando features para jogos futuros...")
         future_df = enrich_features(future_df, engine, update_results=False)
-        future_df['draw_boost'] = future_df['P_pois(X)'] - future_df['P_market(X)']
+        future_df = compute_expert_differences(future_df)
 
         model = load(model_file)
 
@@ -51,8 +53,11 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
             "P_market(1)", "P_market(X)", "P_market(2)",
             "P_elo(1)", "P_elo(X)", "P_elo(2)",
             "P_pois(1)", "P_pois(X)", "P_pois(2)",
+            "d_elo_1", "d_elo_X", "d_elo_2",
+            "d_pois_1", "d_pois_X", "d_pois_2",
             "bookmaker_margin", "gap_market", "entropia_market", "draw_boost",
-            "elo_diff", "elo_uncertainty", "form_elo_lastN"
+            "elo_diff", "elo_uncertainty_home", "elo_uncertainty_away",
+            "form_home", "form_away", "form_diff",
         ]
 
         X_future = future_df[feature_columns]
@@ -69,7 +74,7 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
         future_df['entropia_final'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
         top_two = np.sort(adjusted_probabilities, axis=1)[:, ::-1][:, :2]
         future_df['gap_final'] = top_two[:, 0] - top_two[:, 1]
-        future_df['duplo_score'] = future_df['entropia_final'] + DUO_ALPHA * (1 - future_df['gap_final'])
+        future_df['duplo_score'] = future_df['entropia_final'] + duo_alpha * (1 - future_df['gap_final'])
 
         jogos_duplos_idxs = future_df.nlargest(5, 'duplo_score').index
         logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")

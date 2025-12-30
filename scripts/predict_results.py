@@ -86,8 +86,13 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
         future_df['duplo_score'] = future_df['entropia_final'] + duo_alpha * (1 - future_df['gap_final'])
         future_df['Entropia'] = future_df['entropia_final']
 
-        jogos_duplos_idxs = future_df.nlargest(5, 'duplo_score').index
-        logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")
+        jogos_duplos_idxs = []
+        for _, contest_indices in future_df.groupby("Concurso").groups.items():
+            contest_df = future_df.loc[contest_indices]
+            top_duplos = contest_df.nlargest(5, 'duplo_score').index
+            jogos_duplos_idxs.extend(top_duplos)
+
+        logging.info(f"Índices dos jogos mais incertos para duplos: {sorted(jogos_duplos_idxs)}")
 
         duplo_opcoes = list(classes)
         for idx in jogos_duplos_idxs:
@@ -97,8 +102,11 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
 
         log_cols = ['Entropia', 'entropia_final', 'gap_market', 'gap_final', 'draw_boost']
         present_cols = [c for c in log_cols if c in future_df.columns]
-        logging.info("Top-5 duplos e razões:")
-        logging.info(future_df.loc[jogos_duplos_idxs, ['Aposta'] + present_cols])
+        logging.info("Top-5 duplos e razões por concurso:")
+        for contest, indices in future_df.groupby("Concurso").groups.items():
+            contest_idxs = [idx for idx in jogos_duplos_idxs if idx in indices]
+            logging.info(f"Concurso {contest}: {contest_idxs}")
+            logging.info(future_df.loc[contest_idxs, ['Aposta'] + present_cols])
 
         if output_file:
             logging.info(f"Salvando predições no arquivo {output_file}...")

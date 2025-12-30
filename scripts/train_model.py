@@ -180,7 +180,11 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         val_eval_df = val_eval_df.merge(rateio_df[["Concurso", "Rateio_14", "Acumulou_14"]], on="Concurso", how="left")
 
         def _ev14_medio(metrics) -> float:
-            rateio_series = val_eval_df.set_index("Concurso")["Rateio_14"]
+            rateio_series = (
+                val_eval_df
+                .drop_duplicates(subset="Concurso")
+                .set_index("Concurso")["Rateio_14"]
+            )
             aligned_rateio = rateio_series.reindex(metrics.hits_by_contest.index).fillna(0)
             return float(aligned_rateio.where(metrics.hits_by_contest == 14, 0).mean())
 
@@ -246,7 +250,10 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
 
     except FileNotFoundError:
         logging.error(f"Erro: O arquivo {input_file} não foi encontrado.")
+        raise
     except KeyError as e:
         logging.error(f"Erro: {e}")
+        raise
     except Exception as e:
         logging.error(f"Erro inesperado: {e}")
+        raise

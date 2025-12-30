@@ -156,7 +156,11 @@ def summarize_alpha_grid(
 ) -> pd.DataFrame:
     rateio_series = None
     if rateio_df is not None and not rateio_df.empty:
-        rateio_series = rateio_df.set_index("Concurso")["Rateio_14"]
+        # Garantir que não existam rótulos duplicados de concurso antes de alinhar
+        # os valores de rateio com as métricas calculadas por concurso. Caso
+        # contrário, o reindex do pandas lança erro quando há duplicatas.
+        rateio_unique = rateio_df.drop_duplicates(subset="Concurso")
+        rateio_series = rateio_unique.set_index("Concurso")["Rateio_14"]
 
     def _ev14_mean(hits_series: pd.Series) -> float:
         if rateio_series is None:

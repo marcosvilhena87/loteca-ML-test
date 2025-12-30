@@ -14,6 +14,7 @@ class CardMetrics:
     duplo_coverage: float
     expected_hits: float
     penalty: float
+    hits_by_contest: pd.Series
 
 
 def _compute_entropy_and_gap(probabilities: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -136,7 +137,13 @@ def evaluate_card(
     expected_hits = _expected_hits_per_contest(card_df, class_to_idx).mean()
     penalty = _compute_penalty(card_df).groupby(card_df["Concurso"]).sum().mean()
 
-    return CardMetrics(survival=survival, duplo_coverage=coverage, expected_hits=expected_hits, penalty=penalty)
+    return CardMetrics(
+        survival=survival,
+        duplo_coverage=coverage,
+        expected_hits=expected_hits,
+        penalty=penalty,
+        hits_by_contest=hits_per_contest,
+    )
 
 
 def summarize_alpha_grid(
@@ -145,7 +152,18 @@ def summarize_alpha_grid(
     class_order: Sequence[str],
     alphas: Sequence[float],
     duplo_count: int = 5,
+    rateio_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
+    rateio_series = None
+    if rateio_df is not None and not rateio_df.empty:
+        rateio_series = rateio_df.set_index("Concurso")["Rateio_14"]
+
+    def _ev14_mean(hits_series: pd.Series) -> float:
+        if rateio_series is None:
+            return float("nan")
+        aligned_rateio = rateio_series.reindex(hits_series.index).fillna(0)
+        return float(aligned_rateio.where(hits_series == 14, 0).mean())
+
     records: List[dict] = []
     for alpha in alphas:
         metrics = evaluate_card(df, prob_columns, class_order, alpha, duplo_count)
@@ -157,6 +175,7 @@ def summarize_alpha_grid(
             "duplo_coverage": metrics.duplo_coverage,
             "expected_hits": metrics.expected_hits,
             "penalty": metrics.penalty,
+            "ev14_medio": _ev14_mean(metrics.hits_by_contest),
         }
         records.append(record)
     return pd.DataFrame(records)

@@ -32,6 +32,9 @@ python main.py
 ```
 
 The script processes the raw data, trains a `RandomForestClassifier` and writes predictions to `output/predictions.csv`.
+Training now also fits a **market-corrector** logistic regression stacked on top of the implied probabilities plus context
+features. Both the calibrated RandomForest and the corrector are saved to `models/final_model.pkl` and
+`models/final_model_market_corrector.pkl`, respectively.
 
 ## Running individual steps
 

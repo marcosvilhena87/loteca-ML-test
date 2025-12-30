@@ -178,7 +178,7 @@ def train(input_file, model_file, scaler_file=None, corrector_file=None):
             "Baseline do mercado", y_test, market_prob_test[PROB_COLUMNS].to_numpy()
         )
 
-        logging.info("Treinando modelo corretor do mercado (LogisticRegression)...")
+        logging.info("Treinando modelo corretor do mercado (LogisticRegression pura)...")
         corrector_transformer = ColumnTransformer(
             [
                 ("form_scaler", StandardScaler(), CORRECTOR_FORM_FEATURES),
@@ -208,29 +208,41 @@ def train(input_file, model_file, scaler_file=None, corrector_file=None):
             corrector_X.loc[test_idx],
         )
 
-        calibrated_corrector = CalibratedClassifierCV(
-            estimator=corrector_pipeline,
-            method="isotonic",
-            cv=5,
-        )
-        calibrated_corrector.fit(corrector_X_train, y_train)
-
-        corrector_proba_raw = calibrated_corrector.predict_proba(corrector_X_test)
+        # Versão não calibrada (recomendada)
+        corrector_pipeline.fit(corrector_X_train, y_train)
+        corrector_proba_raw = corrector_pipeline.predict_proba(corrector_X_test)
         corrector_proba = _reorder_probabilities(
-            corrector_proba_raw, calibrated_corrector.classes_
+            corrector_proba_raw, corrector_pipeline.classes_
         )
         corrector_accuracy, corrector_logloss, corrector_brier = _evaluate_probabilities(
-            "Modelo corretor do mercado (calibrado)", y_test, corrector_proba
+            "Modelo corretor do mercado (sem calibração)", y_test, corrector_proba
         )
 
+        # Misturas usando o corretor sem calibração (opcional para produção)
         blended_alphas = [0.2, 0.4, 0.6, 0.8]
         for alpha in blended_alphas:
             blended_proba = alpha * corrector_proba + (1 - alpha) * market_prob_test[PROB_COLUMNS].to_numpy()
             _evaluate_probabilities(
-                f"Corretor calibrado com mistura mercado (alpha={alpha:.1f})",
+                f"Corretor sem calibração com mistura mercado (alpha={alpha:.1f})",
                 y_test,
                 blended_proba,
             )
+
+        # Experimento: calibração sigmoid (Platt scaling)
+        logging.info("Treinando versão calibrada com sigmoid para comparação...")
+        sigmoid_corrector = CalibratedClassifierCV(
+            estimator=corrector_pipeline,
+            method="sigmoid",
+            cv=5,
+        )
+        sigmoid_corrector.fit(corrector_X_train, y_train)
+        sigmoid_proba_raw = sigmoid_corrector.predict_proba(corrector_X_test)
+        sigmoid_proba = _reorder_probabilities(
+            sigmoid_proba_raw, sigmoid_corrector.classes_
+        )
+        _evaluate_probabilities(
+            "Modelo corretor do mercado (calibrado sigmoid)", y_test, sigmoid_proba
+        )
 
         logging.info(f"Salvando o modelo em {model_file}...")
         dump(model, model_file)
@@ -242,7 +254,7 @@ def train(input_file, model_file, scaler_file=None, corrector_file=None):
             )
 
         logging.info(f"Salvando o modelo corretor em {corrector_file}...")
-        dump(calibrated_corrector, corrector_file)
+        dump(corrector_pipeline, corrector_file)
 
         logging.info("Treinamento concluído com sucesso!")
 

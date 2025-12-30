@@ -44,7 +44,7 @@ def train(input_file, model_file, scaler_file):
             class_weight='balanced'
         )
         model = CalibratedClassifierCV(
-            base_estimator=base_model,
+            estimator=base_model,
             method="sigmoid",
             cv=5
         )

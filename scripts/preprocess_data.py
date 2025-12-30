@@ -1,7 +1,8 @@
 import logging
 import pandas as pd
 
-from .features import RatingEngine, compute_implied_probabilities, enrich_features
+from .features import (RatingEngine, compute_expert_differences,
+                       compute_implied_probabilities, enrich_features)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -33,7 +34,8 @@ def process(input_file, output_file):
         engine = RatingEngine()
         df = enrich_features(df, engine, update_results=True)
 
-        df['draw_boost'] = df['P_pois(X)'] - df['P_market(X)']
+        logging.info("Criando deltas explícitos vs. mercado (Elo/Poisson)...")
+        df = compute_expert_differences(df)
 
         logging.info(f"Salvando o arquivo processado em {output_file}...")
         df.to_csv(output_file, index=False, sep=';', decimal='.')

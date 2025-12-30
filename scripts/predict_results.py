@@ -1,11 +1,13 @@
 import logging
+
 import numpy as np
 import pandas as pd
 from joblib import load
 
 from .features import (RatingEngine, compute_expert_differences,
                        compute_implied_probabilities, enrich_features)
-from .train_model import FEATURE_COLUMNS
+from .train_model import (CLASS_ORDER, DEFAULT_FEATURE_VARIANT, get_feature_columns,
+                          _reorder_probas)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -23,7 +25,7 @@ def _load_history(history_file: str) -> pd.DataFrame:
 
 
 def predict(input_file, model_file, scaler_file=None, output_file=None, history_file: str = "data/processed/loteca_treinamento.csv",
-            duo_alpha: float = DEFAULT_DUO_ALPHA):
+            duo_alpha: float = DEFAULT_DUO_ALPHA, feature_variant: str = DEFAULT_FEATURE_VARIANT):
     """Generate predictions and rich diagnostics for future games."""
     try:
         logging.info("Carregando dados dos jogos futuros...")
@@ -48,16 +50,30 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
         future_df = enrich_features(future_df, engine, update_results=False)
         future_df = compute_expert_differences(future_df)
 
-        model = load(model_file)
+        model_artifact = load(model_file)
+        if isinstance(model_artifact, dict) and "model" in model_artifact:
+            trained_variant = model_artifact.get("feature_variant", feature_variant)
+            feature_columns = model_artifact.get("feature_columns", get_feature_columns(trained_variant))
+            model = model_artifact["model"]
+            if feature_variant != trained_variant:
+                logging.warning("Sobrescrevendo variant treinada (%s) pela solicitada (%s).", trained_variant, feature_variant)
+        else:
+            model = model_artifact
+            feature_columns = get_feature_columns(feature_variant)
 
-        X_future = future_df[FEATURE_COLUMNS]
-        probabilities = model.predict_proba(X_future)
+        X_future = future_df[feature_columns]
+        probabilities_raw = model.predict_proba(X_future)
         predictions = model.predict(X_future)
 
         classes = model.classes_
-        prob_df = pd.DataFrame(probabilities, columns=[f"P_final({c})" for c in classes])
+        probabilities = _reorder_probas(probabilities_raw, classes, CLASS_ORDER)
+        prob_df = pd.DataFrame(probabilities, columns=[f"P_final({c})" for c in CLASS_ORDER])
         future_df = pd.concat([future_df.reset_index(drop=True), prob_df], axis=1)
         future_df['Secos'] = predictions
+        future_df['Probabilidade (1)'] = future_df.get('P_final(1)', prob_df.get('P_final(1)'))
+        future_df['Probabilidade (X)'] = future_df.get('P_final(X)', prob_df.get('P_final(X)'))
+        future_df['Probabilidade (2)'] = future_df.get('P_final(2)', prob_df.get('P_final(2)'))
+        future_df['Seco'] = future_df['Secos']
 
         epsilon = 1e-10
         adjusted_probabilities = probabilities + epsilon
@@ -65,6 +81,7 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
         top_two = np.sort(adjusted_probabilities, axis=1)[:, ::-1][:, :2]
         future_df['gap_final'] = top_two[:, 0] - top_two[:, 1]
         future_df['duplo_score'] = future_df['entropia_final'] + duo_alpha * (1 - future_df['gap_final'])
+        future_df['Entropia'] = future_df['entropia_final']
 
         jogos_duplos_idxs = future_df.nlargest(5, 'duplo_score').index
         logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")

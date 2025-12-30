@@ -1,5 +1,5 @@
 import logging
-from typing import List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -13,16 +13,47 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-FEATURE_COLUMNS: List[str] = [
-    "P_market(1)", "P_market(X)", "P_market(2)",
-    "P_elo(1)", "P_elo(X)", "P_elo(2)",
-    "P_pois(1)", "P_pois(X)", "P_pois(2)",
-    "d_elo_1", "d_elo_X", "d_elo_2",
-    "d_pois_1", "d_pois_X", "d_pois_2",
-    "bookmaker_margin", "gap_market", "entropia_market", "draw_boost",
-    "elo_diff", "elo_uncertainty_home", "elo_uncertainty_away",
-    "form_home", "form_away", "form_diff",
-]
+FEATURE_VARIANTS: Dict[str, List[str]] = {
+    "market_plus_deltas": [
+        "P_market(1)", "P_market(X)", "P_market(2)",
+        "d_elo_1", "d_elo_X", "d_elo_2",
+        "d_pois_1", "d_pois_X", "d_pois_2",
+        "bookmaker_margin", "gap_market", "entropia_market", "draw_boost",
+        "elo_diff", "elo_uncertainty_home", "elo_uncertainty_away",
+        "form_home", "form_away", "form_diff",
+    ],
+    "pure_probabilities": [
+        "P_market(1)", "P_market(X)", "P_market(2)",
+        "P_elo(1)", "P_elo(X)", "P_elo(2)",
+        "P_pois(1)", "P_pois(X)", "P_pois(2)",
+        "bookmaker_margin", "gap_market", "entropia_market",
+        "elo_diff", "elo_uncertainty_home", "elo_uncertainty_away",
+        "form_home", "form_away", "form_diff",
+    ],
+    "full_mix": [
+        "P_market(1)", "P_market(X)", "P_market(2)",
+        "P_elo(1)", "P_elo(X)", "P_elo(2)",
+        "P_pois(1)", "P_pois(X)", "P_pois(2)",
+        "d_elo_1", "d_elo_X", "d_elo_2",
+        "d_pois_1", "d_pois_X", "d_pois_2",
+        "bookmaker_margin", "gap_market", "entropia_market", "draw_boost",
+        "elo_diff", "elo_uncertainty_home", "elo_uncertainty_away",
+        "form_home", "form_away", "form_diff",
+    ],
+}
+
+DEFAULT_FEATURE_VARIANT = "market_plus_deltas"
+DEFAULT_C_VALUES = (0.1, 0.3, 1.0, 3.0, 10.0)
+CLASS_ORDER = np.array(['1', 'X', '2'])
+
+
+def get_feature_columns(variant: str = DEFAULT_FEATURE_VARIANT) -> List[str]:
+    if variant not in FEATURE_VARIANTS:
+        raise KeyError(f"Feature variant desconhecida: {variant}. Opções: {list(FEATURE_VARIANTS)}")
+    return FEATURE_VARIANTS[variant]
+
+
+FEATURE_COLUMNS: List[str] = get_feature_columns()
 
 
 def _time_ordered_split(df: pd.DataFrame, test_size: float = 0.2, embargo_contests: int = 1):
@@ -61,50 +92,71 @@ def _reorder_probas(probas: np.ndarray, source_classes: Sequence[str], target_cl
     return probas[:, index_map]
 
 
-def train(input_file, model_file, scaler_file=None):
+def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAULT_FEATURE_VARIANT,
+          c_values: Optional[Sequence[float]] = None):
     """Train a stacked meta-model on engineered features and persist artifacts."""
     try:
         logging.info("Carregando os dados de entrada...")
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
 
-        missing_features = [col for col in FEATURE_COLUMNS if col not in df.columns]
+        feature_columns = get_feature_columns(feature_variant)
+        logging.info("Usando variant de features '%s' (%d colunas)", feature_variant, len(feature_columns))
+        missing_features = [col for col in feature_columns if col not in df.columns]
         if missing_features:
             raise KeyError(f"Features ausentes do conjunto processado: {missing_features}")
 
         logging.info("Separando treino e validação por ordem temporal com embargo...")
         train_df, val_df = _time_ordered_split(df, test_size=0.2, embargo_contests=1)
-        X_train, X_val = train_df[FEATURE_COLUMNS], val_df[FEATURE_COLUMNS]
+        X_train, X_val = train_df[feature_columns], val_df[feature_columns]
         y_train, y_val = train_df['Resultado'], val_df['Resultado']
 
         logging.info("Montando pipeline de mistura (logistic regression multiclasse)...")
-        model = Pipeline([
-            ("scaler", StandardScaler()),
-            ("clf", LogisticRegression(max_iter=500)),
-        ])
 
-        model.fit(X_train, y_train)
+        def _fit_and_score(C_value: float):
+            pipeline = Pipeline([
+                ("scaler", StandardScaler()),
+                ("clf", LogisticRegression(max_iter=500, C=C_value)),
+            ])
+            pipeline.fit(X_train, y_train)
+            val_proba_raw = pipeline.predict_proba(X_val)
+            labels = pipeline.classes_
+            val_proba = _reorder_probas(val_proba_raw, labels, CLASS_ORDER)
+            logloss_model = log_loss(y_val, val_proba, labels=CLASS_ORDER)
+            brier_score = _multiclass_brier(y_val, val_proba, CLASS_ORDER)
+            return {
+                "model": pipeline,
+                "val_proba": val_proba,
+                "logloss_model": logloss_model,
+                "brier": brier_score,
+            }
 
-        logging.info("Avaliando métricas probabilísticas...")
-        val_proba_raw = model.predict_proba(X_val)
-        labels = model.classes_
-        class_order = np.array(['1', 'X', '2'])
-
-        val_proba = _reorder_probas(val_proba_raw, labels, class_order)
-        logloss_model = log_loss(y_val, val_proba, labels=class_order)
-        brier = _multiclass_brier(y_val, val_proba, class_order)
-
-        market_cols = [f"P_market({c})" for c in class_order]
+        c_grid = list(dict.fromkeys(c_values if c_values is not None else DEFAULT_C_VALUES))
+        if not c_grid:
+            raise ValueError("A grade de valores de C não pode ser vazia.")
+        market_cols = [f"P_market({c})" for c in CLASS_ORDER]
         val_market = val_df[market_cols].values
-        logloss_market = log_loss(y_val, val_market, labels=class_order)
-        delta = logloss_market - logloss_model
+        logloss_market = log_loss(y_val, val_market, labels=CLASS_ORDER)
 
-        logging.info(f"Log Loss (modelo) no conjunto de validação: {logloss_model:.4f}")
-        logging.info(f"Log Loss (mercado) no conjunto de validação: {logloss_market:.4f}")
-        logging.info(f"Delta vs. mercado (positivo = ganho): {delta:.4f}")
-        logging.info(f"Brier Score no conjunto de validação: {brier:.4f}")
+        best_run = None
+        for c_val in c_grid:
+            run = _fit_and_score(c_val)
+            delta = logloss_market - run["logloss_model"]
+            logging.info(
+                "C=%.3g | LogLoss model=%.4f | delta vs mercado=%.4f | Brier=%.4f",
+                c_val, run["logloss_model"], delta, run["brier"],
+            )
+            if best_run is None or run["logloss_model"] < best_run["logloss_model"]:
+                best_run = {"C": c_val, **run}
 
-        entropia_final = -np.sum(val_proba * np.log(val_proba + 1e-12), axis=1)
-        top_two = np.sort(val_proba, axis=1)[:, ::-1][:, :2]
+        assert best_run is not None
+        logging.info(
+            "Melhor C=%.3g com LogLoss=%.4f (mercado=%.4f, delta=%.4f)",
+            best_run["C"], best_run["logloss_model"], logloss_market, logloss_market - best_run["logloss_model"],
+        )
+        logging.info(f"Brier Score no conjunto de validação: {best_run['brier']:.4f}")
+
+        entropia_final = -np.sum(best_run["val_proba"] * np.log(best_run["val_proba"] + 1e-12), axis=1)
+        top_two = np.sort(best_run["val_proba"], axis=1)[:, ::-1][:, :2]
         gap_final = top_two[:, 0] - top_two[:, 1]
 
         def _duplo_hit_rate(alpha: float, top_k: int = 50) -> float:
@@ -113,8 +165,8 @@ def train(input_file, model_file, scaler_file=None):
             selected = np.argsort(scores)[::-1][:k]
             hits = 0
             for idx in selected:
-                top2_idx = val_proba[idx].argsort()[::-1][:2]
-                if y_val.iloc[idx] in class_order[top2_idx]:
+                top2_idx = best_run["val_proba"][idx].argsort()[::-1][:2]
+                if y_val.iloc[idx] in CLASS_ORDER[top2_idx]:
                     hits += 1
             return hits / k if k else 0.0
 
@@ -122,8 +174,13 @@ def train(input_file, model_file, scaler_file=None):
             hit_rate = _duplo_hit_rate(alpha)
             logging.info(f"Hit-rate top-2 para duplos (alpha={alpha:.2f}): {hit_rate:.3f}")
 
-        logging.info(f"Salvando o modelo em {model_file}...")
-        dump(model, model_file)
+        logging.info(f"Salvando o modelo em {model_file} (features={feature_variant})...")
+        artifact = {
+            "model": best_run["model"],
+            "feature_variant": feature_variant,
+            "feature_columns": feature_columns,
+        }
+        dump(artifact, model_file)
 
         if scaler_file:
             dump(None, scaler_file)

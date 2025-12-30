@@ -10,6 +10,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from .loteca_metrics import evaluate_card, summarize_alpha_grid
+from .rateio_utils import load_rateio
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -165,15 +166,30 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         )
 
         def _proxy_ev_score(row: pd.Series) -> float:
-            return (2 * row["pct_13"]) + row["pct_12"] + 0.1 * row["expected_hits"] - 0.1 * row["penalty"]
+            return (2 * row["pct_13"]) + row["pct_12"] + 0.3 * row["duplo_coverage"] + 0.1 * row["expected_hits"]
 
         def _select_best_alpha(grid_df: pd.DataFrame) -> Tuple[float, pd.DataFrame]:
             scored = grid_df.assign(proxy_score=grid_df.apply(_proxy_ev_score, axis=1))
-            ordered = scored.sort_values(["proxy_score", "pct_13", "pct_12"], ascending=False)
+            if "ev14_medio" in scored and scored["ev14_medio"].notna().any():
+                ordered = scored.sort_values(["ev14_medio", "pct_13", "pct_12"], ascending=False)
+            else:
+                ordered = scored.sort_values(["proxy_score", "pct_13", "pct_12"], ascending=False)
             return float(ordered.iloc[0]["alpha"]), scored
 
-        model_grid = summarize_alpha_grid(val_eval_df, val_prob_cols, CLASS_ORDER, alpha_grid)
-        market_grid = summarize_alpha_grid(val_eval_df, [f"P_market({c})" for c in CLASS_ORDER], CLASS_ORDER, alpha_grid)
+        rateio_df = load_rateio("data/raw/concurso_rateio.csv")
+        val_eval_df = val_eval_df.merge(rateio_df[["Concurso", "Rateio_14", "Acumulou_14"]], on="Concurso", how="left")
+
+        def _ev14_medio(metrics) -> float:
+            rateio_series = val_eval_df.set_index("Concurso")["Rateio_14"]
+            aligned_rateio = rateio_series.reindex(metrics.hits_by_contest.index).fillna(0)
+            return float(aligned_rateio.where(metrics.hits_by_contest == 14, 0).mean())
+
+        model_grid = summarize_alpha_grid(
+            val_eval_df, val_prob_cols, CLASS_ORDER, alpha_grid, rateio_df=val_eval_df
+        )
+        market_grid = summarize_alpha_grid(
+            val_eval_df, [f"P_market({c})" for c in CLASS_ORDER], CLASS_ORDER, alpha_grid, rateio_df=val_eval_df
+        )
 
         market_grid = market_grid.assign(proxy_score=market_grid.apply(_proxy_ev_score, axis=1))
 
@@ -181,12 +197,17 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         best_metrics = evaluate_card(val_eval_df, val_prob_cols, CLASS_ORDER, alpha=best_alpha)
         market_metrics = evaluate_card(val_eval_df, [f"P_market({c})" for c in CLASS_ORDER], CLASS_ORDER, alpha=best_alpha)
 
-        logging.info("Backtest de cartões (modelo vs mercado) usando proxy de EV (2*pct13 + pct12 + 0.1*EH - 0.1*penalty):")
+        ev_model = _ev14_medio(best_metrics)
+        ev_market = _ev14_medio(market_metrics)
+
+        logging.info("Backtest de cartões (modelo vs mercado) usando proxy de EV (2*pct13 + pct12 + 0.3*cobertura + 0.1*EH):")
         for _, row in model_grid.merge(market_grid, on="alpha", suffixes=("_modelo", "_mercado")).iterrows():
             logging.info(
-                "alpha=%.2f | proxy=%.2f | %%>=13 modelo=%.1f (>=12=%.1f) vs mercado=%.1f (>=12=%.1f) | cobertura=%.2f | EH=%.2f",
+                "alpha=%.2f | proxy=%.2f | EV14=%.0f vs mercado=%.0f | %%>=13 modelo=%.1f (>=12=%.1f) vs mercado=%.1f (>=12=%.1f) | cobertura=%.2f | EH=%.2f",
                 row["alpha"],
                 row["proxy_score_modelo"],
+                row.get("ev14_medio_modelo", 0),
+                row.get("ev14_medio_mercado", 0),
                 row["pct_13_modelo"],
                 row["pct_12_modelo"],
                 row["pct_13_mercado"],
@@ -196,14 +217,16 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             )
 
         logging.info(
-            "Alpha ótimo=%.2f (proxy=%.2f) | Modelo: %%>=13=%.1f, %%>=12=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado %%>=13=%.1f",
+            "Alpha ótimo=%.2f (proxy=%.2f) | Modelo: EV14=%.0f, %%>=13=%.1f, %%>=12=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV14=%.0f, %%>=13=%.1f",
             best_alpha,
             float(model_grid.loc[model_grid["alpha"] == best_alpha, "proxy_score"].iloc[0]),
+            ev_model,
             best_metrics.survival.get(13, 0.0),
             best_metrics.survival.get(12, 0.0),
             best_metrics.duplo_coverage,
             best_metrics.expected_hits,
             best_metrics.penalty,
+            ev_market,
             market_metrics.survival.get(13, 0.0),
         )
 

@@ -8,7 +8,7 @@ from sklearn.metrics import log_loss
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from joblib import dump  # Usando joblib para salvar os modelos
 
-from .feature_engineering import CLASSES, MODEL_FEATURES
+from .feature_engineering import CLASSES, MODEL_FEATURES, PROB_COLUMNS
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -46,18 +46,18 @@ def train(input_file, model_file, scaler_file=None):
                 X, y, test_size=0.2, random_state=42, stratify=y
             )
 
-        logging.info("Treinando o modelo com calibração de probabilidades (sigmoid)...")
+        logging.info("Treinando o modelo com calibração de probabilidades (isotonic)...")
         base_model = RandomForestClassifier(
             random_state=42,
             n_estimators=200,
-            max_depth=12,
-            min_samples_leaf=50,
-            min_samples_split=100,
+            max_depth=10,
+            min_samples_leaf=100,
+            min_samples_split=200,
             class_weight='balanced'
         )
         model = CalibratedClassifierCV(
             estimator=base_model,
-            method="sigmoid",
+            method="isotonic",
             cv=5
         )
         model.fit(X_train, y_train)
@@ -79,9 +79,20 @@ def train(input_file, model_file, scaler_file=None):
         true_one_hot = pd.get_dummies(y_test).reindex(columns=CLASSES, fill_value=0).values
         brier = np.mean(np.sum((true_one_hot - y_test_proba) ** 2, axis=1))
 
+        logging.info("Calculando baseline de mercado (argmax das probabilidades das odds)...")
+        market_to_result = {
+            'P(1)': '1',
+            'P(X)': 'X',
+            'P(2)': '2'
+        }
+        market_prob_test = df.loc[X_test.index, PROB_COLUMNS]
+        market_preds = market_prob_test.idxmax(axis=1).map(market_to_result)
+        market_accuracy = (market_preds == y_test).mean()
+
         logging.info(f"Acurácia no conjunto de teste: {accuracy:.4f}")
         logging.info(f"Log loss no conjunto de teste: {logloss:.4f}")
         logging.info(f"Brier score (multi-classe) no conjunto de teste: {brier:.4f}")
+        logging.info(f"Acurácia baseline do mercado (seco pelas odds): {market_accuracy:.4f}")
 
         logging.info(f"Salvando o modelo em {model_file}...")
         dump(model, model_file)

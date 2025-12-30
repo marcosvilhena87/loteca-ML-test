@@ -15,6 +15,8 @@ class CardMetrics:
     expected_hits: float
     penalty: float
     hits_by_contest: pd.Series
+    p14_by_contest: pd.Series
+    p14_medio: float
 
 
 def _compute_entropy_and_gap(probabilities: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -75,16 +77,22 @@ def _build_card_frame(
 
 
 def _contest_hits(card_df: pd.DataFrame, class_to_idx: Mapping[str, int]) -> pd.DataFrame:
-    def _row_hit(row: pd.Series) -> tuple[bool, bool, float]:
+    def _row_hit(row: pd.Series) -> tuple[bool, bool, float, float]:
         seco_hit = row["Resultado"] == row["Seco"]
         duplo_hit = row["Resultado"] in row["Duplo_opcoes"] if row["Duplo"] else False
         actual_idx = class_to_idx.get(row["Resultado"], None)
         prob_actual = row["Probabilidades"][actual_idx] if actual_idx is not None else 0.0
-        return seco_hit or duplo_hit, seco_hit, prob_actual
+
+        if row["Duplo"]:
+            prob_cover = sum(row["Probabilidades"][class_to_idx[c]] for c in row["Duplo_opcoes"])
+        else:
+            prob_cover = row["Probabilidades"][class_to_idx[row["Seco"]]]
+
+        return seco_hit or duplo_hit, seco_hit, prob_actual, prob_cover
 
     hit_data = card_df.apply(_row_hit, axis=1, result_type="expand")
     card_df = card_df.copy()
-    card_df[["Hit", "Seco_hit", "Prob_real"]] = hit_data
+    card_df[["Hit", "Seco_hit", "Prob_real", "Prob_cover"]] = hit_data
     return card_df
 
 
@@ -93,14 +101,8 @@ def _compute_penalty(card_df: pd.DataFrame) -> pd.Series:
     return -np.log(card_df["Prob_real"] + epsilon)
 
 
-def _expected_hits_per_contest(card_df: pd.DataFrame, class_to_idx: Mapping[str, int]) -> pd.Series:
-    def _row_expectation(row: pd.Series) -> float:
-        probs = row["Probabilidades"]
-        if row["Duplo"]:
-            return sum(probs[class_to_idx[c]] for c in row["Duplo_opcoes"])
-        return probs[class_to_idx[row["Seco"]]]
-
-    expectations = card_df.apply(_row_expectation, axis=1)
+def _expected_hits_per_contest(card_df: pd.DataFrame) -> pd.Series:
+    expectations = card_df["Prob_cover"]
     return expectations.groupby(card_df["Concurso"]).sum()
 
 
@@ -134,8 +136,10 @@ def evaluate_card(
         survival[threshold] = (survived / total_contests) * 100 if total_contests else 0.0
 
     coverage = _coverage_ratio(card_df)
-    expected_hits = _expected_hits_per_contest(card_df, class_to_idx).mean()
+    expected_hits = _expected_hits_per_contest(card_df).mean()
     penalty = _compute_penalty(card_df).groupby(card_df["Concurso"]).sum().mean()
+    p14_by_contest = card_df.groupby("Concurso")["Prob_cover"].prod()
+    p14_medio = p14_by_contest.mean()
 
     return CardMetrics(
         survival=survival,
@@ -143,6 +147,8 @@ def evaluate_card(
         expected_hits=expected_hits,
         penalty=penalty,
         hits_by_contest=hits_per_contest,
+        p14_by_contest=p14_by_contest,
+        p14_medio=p14_medio,
     )
 
 
@@ -162,11 +168,11 @@ def summarize_alpha_grid(
         rateio_unique = rateio_df.drop_duplicates(subset="Concurso")
         rateio_series = rateio_unique.set_index("Concurso")["Rateio_14"]
 
-    def _ev14_mean(hits_series: pd.Series) -> float:
+    def _ev14_mean(p14_series: pd.Series) -> float:
         if rateio_series is None:
             return float("nan")
-        aligned_rateio = rateio_series.reindex(hits_series.index).fillna(0)
-        return float(aligned_rateio.where(hits_series == 14, 0).mean())
+        aligned_rateio = rateio_series.reindex(p14_series.index).fillna(0)
+        return float((p14_series * aligned_rateio).mean())
 
     records: List[dict] = []
     for alpha in alphas:
@@ -179,7 +185,7 @@ def summarize_alpha_grid(
             "duplo_coverage": metrics.duplo_coverage,
             "expected_hits": metrics.expected_hits,
             "penalty": metrics.penalty,
-            "ev14_medio": _ev14_mean(metrics.hits_by_contest),
+            "ev14_medio": _ev14_mean(metrics.p14_by_contest),
         }
         records.append(record)
     return pd.DataFrame(records)

@@ -40,28 +40,36 @@ def _build_card_frame(
     duplo_count: int,
 ) -> pd.DataFrame:
     classes = list(class_order)
-    duplo_idxs = set(_select_duplo_indices(probabilities, alpha=alpha, duplo_count=duplo_count))
     top_two_indices = np.argsort(probabilities, axis=1)[:, ::-1]
     chosen_top = top_two_indices[:, 0]
 
     records = []
-    for idx, row in enumerate(probabilities):
-        seco_choice = classes[chosen_top[idx]]
-        duplo = idx in duplo_idxs
-        if duplo:
-            duplo_choices = [classes[top_two_indices[idx, 0]], classes[top_two_indices[idx, 1]]]
-        else:
-            duplo_choices = []
-        records.append(
-            {
-                "Concurso": df.iloc[idx]["Concurso"],
-                "Resultado": df.iloc[idx]["Resultado"],
-                "Seco": seco_choice,
-                "Duplo": duplo,
-                "Duplo_opcoes": duplo_choices,
-                "Probabilidades": row,
-            }
-        )
+    df_reset = df.reset_index(drop=True)
+    for _, contest_indices in df_reset.groupby("Concurso").indices.items():
+        contest_indices = list(contest_indices)
+        contest_probs = probabilities[contest_indices]
+        duplo_idxs = {
+            contest_indices[i]
+            for i in _select_duplo_indices(contest_probs, alpha=alpha, duplo_count=duplo_count)
+        }
+
+        for idx in contest_indices:
+            seco_choice = classes[chosen_top[idx]]
+            duplo = idx in duplo_idxs
+            if duplo:
+                duplo_choices = [classes[top_two_indices[idx, 0]], classes[top_two_indices[idx, 1]]]
+            else:
+                duplo_choices = []
+            records.append(
+                {
+                    "Concurso": df_reset.iloc[idx]["Concurso"],
+                    "Resultado": df_reset.iloc[idx]["Resultado"],
+                    "Seco": seco_choice,
+                    "Duplo": duplo,
+                    "Duplo_opcoes": duplo_choices,
+                    "Probabilidades": probabilities[idx],
+                }
+            )
     return pd.DataFrame(records)
 
 

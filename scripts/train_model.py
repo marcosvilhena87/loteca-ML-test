@@ -185,8 +185,8 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
                 .drop_duplicates(subset="Concurso")
                 .set_index("Concurso")["Rateio_14"]
             )
-            aligned_rateio = rateio_series.reindex(metrics.hits_by_contest.index).fillna(0)
-            return float(aligned_rateio.where(metrics.hits_by_contest == 14, 0).mean())
+            aligned_rateio = rateio_series.reindex(metrics.p14_by_contest.index).fillna(0)
+            return float((metrics.p14_by_contest * aligned_rateio).mean())
 
         model_grid = summarize_alpha_grid(
             val_eval_df, val_prob_cols, CLASS_ORDER, alpha_grid, rateio_df=val_eval_df

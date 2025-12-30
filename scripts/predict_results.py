@@ -76,7 +76,11 @@ def predict(input_file, model_file, scaler_file, output_file):
         duplo_opcoes = ['1', 'X', '2']
         for idx in jogos_duplos_idxs:
             mais_provaveis = probabilities[idx].argsort()[-2:][::-1]
-            df.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"
+            duplos_ordenados = sorted(
+                (duplo_opcoes[mais_provaveis[0]], duplo_opcoes[mais_provaveis[1]]),
+                key=['1', 'X', '2'].index,
+            )
+            df.loc[idx, 'Aposta'] = ", ".join(duplos_ordenados)
 
         logging.info(f"Salvando predições no arquivo {output_file}...")
         df.to_csv(output_file, sep=';', index=False)

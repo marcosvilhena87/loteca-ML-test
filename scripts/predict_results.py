@@ -1,107 +1,97 @@
 import logging
-import pandas as pd
 import numpy as np
-from joblib import load  # Para carregar os modelos previamente treinados
+import pandas as pd
+from joblib import load
+
+from .features import RatingEngine, compute_implied_probabilities, enrich_features
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
-def predict(input_file, model_file, scaler_file, output_file):
-    """Generate predictions for future games and write them to CSV.
 
-    Parameters
-    ----------
-    input_file : str
-        CSV file with upcoming games and odds or probabilities.
-    model_file : str
-        Path of the trained model to load.
-    scaler_file : str
-        Path of the scaler used during training.
-    output_file : str
-        Destination path for the predictions CSV.
+DUO_ALPHA = 0.5
 
-    Returns
-    -------
-    None
-        The predictions are saved to ``output_file``.
-    """
+
+def _load_history(history_file: str) -> pd.DataFrame:
     try:
-        # Carregando os dados dos jogos futuros
+        return pd.read_csv(history_file, delimiter=';', decimal='.')
+    except FileNotFoundError:
+        logging.warning(f"Arquivo de histórico {history_file} não encontrado. Continuando sem histórico.")
+        return pd.DataFrame()
+
+
+def predict(input_file, model_file, scaler_file=None, output_file=None, history_file: str = "data/processed/loteca_treinamento.csv"):
+    """Generate predictions and rich diagnostics for future games."""
+    try:
         logging.info("Carregando dados dos jogos futuros...")
-        df = pd.read_csv(input_file, delimiter=';', decimal='.')
+        future_df = pd.read_csv(input_file, delimiter=';', decimal='.')
 
-        # Verificando se as colunas de probabilidades estão presentes
-        required_prob_cols = ['P(1)', 'P(X)', 'P(2)']
-        if not all(col in df.columns for col in required_prob_cols):
-            # Caso as colunas de probabilidade não existam, calculá-las a partir das odds
-            odds_cols = ['Odds 1', 'Odds X', 'Odds 2']
-            if all(col in df.columns for col in odds_cols):
-                logging.info("Colunas de probabilidade ausentes. Calculando a partir das odds...")
-                df['P(1)'] = 1 / df['Odds 1']
-                df['P(X)'] = 1 / df['Odds X']
-                df['P(2)'] = 1 / df['Odds 2']
+        required_columns = ['Odds 1', 'Odds X', 'Odds 2', 'Mandante', 'Visitante']
+        missing_cols = [c for c in required_columns if c not in future_df.columns]
+        if missing_cols:
+            raise ValueError(f"Colunas necessárias ausentes em {input_file}: {missing_cols}")
 
-                prob_sum = df['P(1)'] + df['P(X)'] + df['P(2)']
-                df['P(1)'] /= prob_sum
-                df['P(X)'] /= prob_sum
-                df['P(2)'] /= prob_sum
-            else:
-                raise ValueError(
-                    f"As colunas de odds {odds_cols} são necessárias para calcular as probabilidades no arquivo {input_file}."
-                )
+        future_df = compute_implied_probabilities(future_df)
 
-        # Reconfirmando que as colunas de probabilidade agora estão presentes
-        required_columns = ['P(1)', 'P(X)', 'P(2)']
-        
-        # Carregando o modelo e o scaler
-        logging.info("Carregando modelo e scaler...")
+        history_df = _load_history(history_file)
+        engine = RatingEngine()
+        if not history_df.empty and {'Resultado', 'Mandante', 'Visitante'}.issubset(history_df.columns):
+            logging.info("Atualizando estados de Elo/Poisson com histórico...")
+            enrich_features(history_df, engine, update_results=True)
+        else:
+            logging.info("Histórico indisponível ou incompleto. Usando valores iniciais de Elo/Poisson.")
+
+        logging.info("Gerando features para jogos futuros...")
+        future_df = enrich_features(future_df, engine, update_results=False)
+        future_df['draw_boost'] = future_df['P_pois(X)'] - future_df['P_market(X)']
+
         model = load(model_file)
-        scaler = load(scaler_file)
 
-        # Selecionando as features para predição e escalando
-        logging.info("Preparando dados para predição...")
-        X_future = df[required_columns]
-        X_future_scaled = scaler.transform(X_future)
+        feature_columns = [
+            "P_market(1)", "P_market(X)", "P_market(2)",
+            "P_elo(1)", "P_elo(X)", "P_elo(2)",
+            "P_pois(1)", "P_pois(X)", "P_pois(2)",
+            "bookmaker_margin", "gap_market", "entropia_market", "draw_boost",
+            "elo_diff", "elo_uncertainty", "form_elo_lastN"
+        ]
 
-        # Gerando as predições
-        logging.info("Gerando predições...")
-        probabilities = model.predict_proba(X_future_scaled)
-        predictions = model.predict(X_future_scaled)
+        X_future = future_df[feature_columns]
+        probabilities = model.predict_proba(X_future)
+        predictions = model.predict(X_future)
 
-        # Adicionando as predições ao DataFrame
-        logging.info("Adicionando predições ao DataFrame...")
-        df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
-        df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
-        df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)        
-        df['Secos'] = predictions
+        classes = model.classes_
+        prob_df = pd.DataFrame(probabilities, columns=[f"P_final({c})" for c in classes])
+        future_df = pd.concat([future_df.reset_index(drop=True), prob_df], axis=1)
+        future_df['Secos'] = predictions
 
-        # Adicionando um valor pequeno para evitar problemas com log(0)
         epsilon = 1e-10
         adjusted_probabilities = probabilities + epsilon
+        future_df['entropia_final'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
+        top_two = np.sort(adjusted_probabilities, axis=1)[:, ::-1][:, :2]
+        future_df['gap_final'] = top_two[:, 0] - top_two[:, 1]
+        future_df['duplo_score'] = future_df['entropia_final'] + DUO_ALPHA * (1 - future_df['gap_final'])
 
-        # Calculando a entropia com as probabilidades ajustadas
-        logging.info("Calculando entropia para determinar os jogos mais incertos...")
-        df['Entropia'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
-
-        # Identificar os 5 jogos mais incertos para aplicar os "duplos"
-        jogos_duplos_idxs = df.nlargest(5, 'Entropia').index
+        jogos_duplos_idxs = future_df.nlargest(5, 'duplo_score').index
         logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")
 
-        # Gerar a coluna "Aposta"
-        logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
-        df['Aposta'] = df['Secos']  # Copia as apostas secas inicialmente
-
-        # Escolhendo os "duplos" para os 5 jogos mais incertos
-        duplo_opcoes = ['1', 'X', '2']
+        duplo_opcoes = list(classes)
         for idx in jogos_duplos_idxs:
-            mais_provaveis = probabilities[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
-            df.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"
+            mais_provaveis = adjusted_probabilities[idx].argsort()[-2:][::-1]
+            future_df.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"
+        future_df['Aposta'] = future_df['Aposta'].fillna(future_df['Secos'])
 
-        # Salvando as predições no arquivo
-        logging.info(f"Salvando predições no arquivo {output_file}...")
-        df.to_csv(output_file, sep=';', index=False)
-        logging.info(f"Previsões salvas com sucesso em {output_file}!")
-    
+        log_cols = ['Entropia', 'entropia_final', 'gap_market', 'gap_final', 'draw_boost']
+        present_cols = [c for c in log_cols if c in future_df.columns]
+        logging.info("Top-5 duplos e razões:")
+        logging.info(future_df.loc[jogos_duplos_idxs, ['Aposta'] + present_cols])
+
+        if output_file:
+            logging.info(f"Salvando predições no arquivo {output_file}...")
+            future_df.to_csv(output_file, sep=';', index=False)
+            logging.info(f"Previsões salvas com sucesso em {output_file}!")
+
+        return future_df
+
     except FileNotFoundError as e:
         logging.error(f"Erro: Arquivo não encontrado - {e}")
     except ValueError as e:

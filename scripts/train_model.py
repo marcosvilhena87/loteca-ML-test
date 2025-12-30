@@ -57,6 +57,27 @@ def _log_metrics(prefix: str, accuracy: float, logloss: float, brier: float) -> 
     logging.info(f"{prefix} Brier score (multi-classe): {brier:.4f}")
 
 
+def _evaluate_probabilities(
+    prefix: str, y_true: pd.Series, proba: np.ndarray
+) -> tuple[float, float, float]:
+    """Compute metrics and log them for a given probability matrix."""
+
+    preds = np.asarray([CLASSES[idx] for idx in proba.argmax(axis=1)])
+    accuracy = float((preds == y_true.to_numpy()).mean())
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Labels passed.*ordered lexicographically",
+            category=UserWarning,
+        )
+        logloss = log_loss(y_true, proba, labels=CLASSES)
+
+    brier = _brier_score_multi(y_true, proba)
+    _log_metrics(prefix, accuracy, logloss, brier)
+    return accuracy, logloss, brier
+
+
 def train(input_file, model_file, scaler_file=None, corrector_file=None):
     """Train classifiers on processed data and persist artifacts.
 
@@ -81,16 +102,31 @@ def train(input_file, model_file, scaler_file=None, corrector_file=None):
 
         logging.info("Dividindo os dados em treino e teste...")
         if "Concurso" in df.columns:
-            concursos = pd.Index(pd.unique(df["Concurso"]))
-            concursos = pd.Index(np.sort(concursos))
+            concursos_numeric = pd.to_numeric(df["Concurso"], errors="coerce")
+            unique_concursos = concursos_numeric.dropna().astype(int).unique()
+            concursos = pd.Index(np.sort(unique_concursos))
 
             if len(concursos) >= 2:
+                full_range = np.arange(concursos.min(), concursos.max() + 1)
+                missing_concursos = np.setdiff1d(full_range, concursos)
+                if len(missing_concursos) > 0:
+                    logging.warning(
+                        "Concursos faltantes detectados no intervalo %s-%s: %s",
+                        concursos.min(),
+                        concursos.max(),
+                        missing_concursos.tolist(),
+                    )
+                else:
+                    logging.info(
+                        "Nenhum concurso faltante detectado no intervalo temporal avaliado."
+                    )
+
                 n_test = max(1, int(np.ceil(len(concursos) * 0.2)))
                 train_concursos = concursos[:-n_test]
                 test_concursos = concursos[-n_test:]
 
-                train_idx = df.index[df["Concurso"].isin(train_concursos)]
-                test_idx = df.index[df["Concurso"].isin(test_concursos)]
+                train_idx = df.index[concursos_numeric.isin(train_concursos)]
+                test_idx = df.index[concursos_numeric.isin(test_concursos)]
                 logging.info(
                     "Split temporal por concurso. Treinando em %s e testando em %s",
                     train_concursos.tolist(),
@@ -132,40 +168,14 @@ def train(input_file, model_file, scaler_file=None, corrector_file=None):
         logging.info("Calculando métricas de avaliação...")
         y_test_proba_raw = model.predict_proba(X_test)
         y_test_proba = _reorder_probabilities(y_test_proba_raw, model.classes_)
-        accuracy = model.score(X_test, y_test)
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="Labels passed.*ordered lexicographically",
-                category=UserWarning,
-            )
-            logloss = log_loss(y_test, y_test_proba, labels=CLASSES)
-
-        brier = _brier_score_multi(y_test, y_test_proba)
+        accuracy, logloss, brier = _evaluate_probabilities(
+            "Modelo principal", y_test, y_test_proba
+        )
 
         logging.info("Calculando baseline de mercado (argmax das probabilidades das odds)...")
-        market_to_result = {
-            'P(1)': '1',
-            'P(X)': 'X',
-            'P(2)': '2'
-        }
         market_prob_test = df.loc[X_test.index, PROB_COLUMNS]
-        market_preds = market_prob_test.idxmax(axis=1).map(market_to_result)
-        market_accuracy = (market_preds == y_test).mean()
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="Labels passed.*ordered lexicographically",
-                category=UserWarning,
-            )
-            market_logloss = log_loss(
-                y_test,
-                market_prob_test[PROB_COLUMNS].to_numpy(),
-                labels=CLASSES,
-            )
-
-        market_brier = _brier_score_multi(
-            y_test, market_prob_test[PROB_COLUMNS].to_numpy()
+        market_accuracy, market_logloss, market_brier = _evaluate_probabilities(
+            "Baseline do mercado", y_test, market_prob_test[PROB_COLUMNS].to_numpy()
         )
 
         logging.info("Treinando modelo corretor do mercado (LogisticRegression)...")
@@ -198,30 +208,29 @@ def train(input_file, model_file, scaler_file=None, corrector_file=None):
             corrector_X.loc[test_idx],
         )
 
-        corrector_pipeline.fit(corrector_X_train, y_train)
-        corrector_proba_raw = corrector_pipeline.predict_proba(corrector_X_test)
+        calibrated_corrector = CalibratedClassifierCV(
+            estimator=corrector_pipeline,
+            method="isotonic",
+            cv=5,
+        )
+        calibrated_corrector.fit(corrector_X_train, y_train)
+
+        corrector_proba_raw = calibrated_corrector.predict_proba(corrector_X_test)
         corrector_proba = _reorder_probabilities(
-            corrector_proba_raw, corrector_pipeline.classes_
+            corrector_proba_raw, calibrated_corrector.classes_
         )
-        corrector_accuracy = corrector_pipeline.score(corrector_X_test, y_test)
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="Labels passed.*ordered lexicographically",
-                category=UserWarning,
+        corrector_accuracy, corrector_logloss, corrector_brier = _evaluate_probabilities(
+            "Modelo corretor do mercado (calibrado)", y_test, corrector_proba
+        )
+
+        blended_alphas = [0.2, 0.4, 0.6, 0.8]
+        for alpha in blended_alphas:
+            blended_proba = alpha * corrector_proba + (1 - alpha) * market_prob_test[PROB_COLUMNS].to_numpy()
+            _evaluate_probabilities(
+                f"Corretor calibrado com mistura mercado (alpha={alpha:.1f})",
+                y_test,
+                blended_proba,
             )
-            corrector_logloss = log_loss(y_test, corrector_proba, labels=CLASSES)
-
-        corrector_brier = _brier_score_multi(y_test, corrector_proba)
-
-        _log_metrics("Modelo principal", accuracy, logloss, brier)
-        logging.info(
-            f"Acurácia baseline do mercado (seco pelas odds): {market_accuracy:.4f}"
-        )
-        _log_metrics("Baseline do mercado", market_accuracy, market_logloss, market_brier)
-        _log_metrics(
-            "Modelo corretor do mercado", corrector_accuracy, corrector_logloss, corrector_brier
-        )
 
         logging.info(f"Salvando o modelo em {model_file}...")
         dump(model, model_file)
@@ -233,7 +242,7 @@ def train(input_file, model_file, scaler_file=None, corrector_file=None):
             )
 
         logging.info(f"Salvando o modelo corretor em {corrector_file}...")
-        dump(corrector_pipeline, corrector_file)
+        dump(calibrated_corrector, corrector_file)
 
         logging.info("Treinamento concluído com sucesso!")
 

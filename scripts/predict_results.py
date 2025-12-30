@@ -1,12 +1,10 @@
 import logging
-from pathlib import Path
 import pandas as pd
 import numpy as np
 from joblib import load  # Para carregar os modelos previamente treinados
 
 from .feature_engineering import (
     CLASSES,
-    MARKET_CORRECTOR_FEATURES,
     MODEL_FEATURES,
     PROB_COLUMNS,
     add_domain_features,
@@ -25,24 +23,10 @@ def _reorder_probabilities(proba: np.ndarray, classes: np.ndarray) -> np.ndarray
         raise ValueError(
             f"Classes esperadas ausentes do modelo: {missing}. Classes disponíveis: {list(classes)}"
         )
-    if len(classes) != len(set(classes)):
-        raise ValueError("Classes duplicadas detectadas no estimador.")
     return np.column_stack([proba[:, class_to_index[cls]] for cls in CLASSES])
 
 
-def _pick_indices(df: pd.DataFrame, filters, sort_col: str, target: int, exclude=None):
-    """Pick indices using successive filters until ``target`` rows are found."""
-
-    available = df if exclude is None else df.drop(index=exclude)
-
-    for i, filter_step in enumerate(filters):
-        subset = filter_step(available)
-        if len(subset) >= target or i == len(filters) - 1:
-            return subset.nlargest(target, sort_col).index
-    return pd.Index([])
-
-
-def predict(input_file, model_file, scaler_file, output_file, corrector_file=None):
+def predict(input_file, model_file, scaler_file, output_file):
     """Generate predictions for future games and write them to CSV."""
     try:
         logging.info("Carregando dados dos jogos futuros...")
@@ -53,104 +37,54 @@ def predict(input_file, model_file, scaler_file, output_file, corrector_file=Non
 
         logging.info("Criando features específicas da Loteca...")
         df = add_domain_features(df)
-        df = df.reset_index(drop=True)
 
-        logging.info("Carregando modelos...")
+        logging.info("Carregando modelo...")
         model = load(model_file)
 
-        if corrector_file is None:
-            model_path = Path(model_file)
-            corrector_file = model_path.with_name(
-                f"{model_path.stem}_market_corrector{model_path.suffix}"
-            )
-
-        corrector_model = load(corrector_file)
-
         logging.info(f"Ordem das classes do modelo: {list(model.classes_)}")
-        logging.info(
-            "Ordem das classes do corretor: %s",
-            list(corrector_model.classes_),
-        )
 
         logging.info("Preparando dados para predição...")
         X_future = df[MODEL_FEATURES]
 
         logging.info("Gerando predições...")
-        base_probabilities = _reorder_probabilities(
-            model.predict_proba(X_future), model.classes_
-        )
-        corrected_probabilities = _reorder_probabilities(
-            corrector_model.predict_proba(df[MARKET_CORRECTOR_FEATURES]),
-            corrector_model.classes_,
-        )
-
-        if corrected_probabilities.shape[1] != len(CLASSES):
-            raise ValueError(
-                "Número inesperado de colunas de probabilidade após reordenar as classes."
-            )
+        probabilities = _reorder_probabilities(model.predict_proba(X_future), model.classes_)
 
         logging.info("Adicionando predições ao DataFrame com mapeamento correto das classes...")
-        df['Probabilidade Modelo (1)'] = np.round(base_probabilities[:, 0], 5)
-        df['Probabilidade Modelo (X)'] = np.round(base_probabilities[:, 1], 5)
-        df['Probabilidade Modelo (2)'] = np.round(base_probabilities[:, 2], 5)
-
-        df['Probabilidade (1)'] = np.round(corrected_probabilities[:, 0], 5)
-        df['Probabilidade (X)'] = np.round(corrected_probabilities[:, 1], 5)
-        df['Probabilidade (2)'] = np.round(corrected_probabilities[:, 2], 5)
+        df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
+        df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
+        df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)
 
         market_top = df[PROB_COLUMNS].to_numpy().argmax(axis=1)
         df['Seco_Mercado'] = [CLASSES[idx] for idx in market_top]
 
-        base_predictions = [CLASSES[idx] for idx in base_probabilities.argmax(axis=1)]
-        corrected_predictions = [CLASSES[idx] for idx in corrected_probabilities.argmax(axis=1)]
-        df['Seco_Modelo'] = base_predictions
-        df['Seco_Corretor'] = corrected_predictions
+        predictions_mapped = [CLASSES[idx] for idx in probabilities.argmax(axis=1)]
+        df['Seco_Modelo'] = predictions_mapped
 
         epsilon = 1e-10
-        adjusted_probabilities = corrected_probabilities + epsilon
+        adjusted_probabilities = probabilities + epsilon
 
         logging.info("Calculando entropia para determinar os jogos mais incertos...")
         df['Entropia'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
-        df['Pmax_Corretor'] = corrected_probabilities.max(axis=1)
-        df['Score_Duplo'] = df['Entropia'] * (1 - df['Pmax_Corretor'])
+        df['Pmax_Modelo'] = probabilities.max(axis=1)
+        df['Score_Duplo'] = df['Entropia'] * (1 - df['Pmax_Modelo'])
 
-        triplo_filters = [
-            lambda d: d[(d['Pmax_Corretor'] <= 0.55) & (d['Probabilidade (X)'] >= 0.20)],
-            lambda d: d[(d['Pmax_Corretor'] <= 0.65)],
-            lambda d: d,
-        ]
-        jogos_triplos_idxs = _pick_indices(df, triplo_filters, 'Entropia', 3)
-        logging.info("Gerando a coluna de aposta com 6 secos, 5 duplos e 3 triplos...")
+        candidatos = df[(df['Pmax_Modelo'] <= 0.60) & (df['Probabilidade (X)'] >= 0.22)]
+        if len(candidatos) < 5:
+            candidatos = df[(df['Pmax_Modelo'] <= 0.70) & (df['Probabilidade (X)'] >= 0.18)]
+        if len(candidatos) < 5:
+            candidatos = df
 
-        candidatos_duplo_filters = [
-            lambda d: d[(d['Pmax_Corretor'] <= 0.60) & (d['Probabilidade (X)'] >= 0.22)],
-            lambda d: d[(d['Pmax_Corretor'] <= 0.70) & (d['Probabilidade (X)'] >= 0.18)],
-            lambda d: d,
-        ]
+        jogos_duplos_idxs = candidatos.nlargest(5, 'Score_Duplo').index
+        logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")
 
-        jogos_duplos_idxs = _pick_indices(
-            df,
-            candidatos_duplo_filters,
-            'Score_Duplo',
-            5,
-            exclude=jogos_triplos_idxs,
-        )
-        logging.info(f"Índices escolhidos para triplos: {jogos_triplos_idxs.tolist()}")
-        logging.info(f"Índices escolhidos para duplos: {jogos_duplos_idxs.tolist()}")
-
-        df['Aposta'] = df['Seco_Corretor']
+        logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
+        df['Aposta'] = df['Seco_Mercado']
 
         df['Duplo_Modelo'] = ""
-        df['Triplo_Modelo'] = ""
-
-        for idx in jogos_triplos_idxs:
-            df.loc[idx, 'Aposta'] = '1, X, 2'
-            df.loc[idx, 'Triplo_Modelo'] = '1, X, 2'
 
         duplo_opcoes = ['1', 'X', '2']
         for idx in jogos_duplos_idxs:
-            pos = df.index.get_loc(idx)
-            mais_provaveis = corrected_probabilities[pos].argsort()[-2:][::-1]
+            mais_provaveis = probabilities[idx].argsort()[-2:][::-1]
             duplos_ordenados = sorted(
                 (duplo_opcoes[mais_provaveis[0]], duplo_opcoes[mais_provaveis[1]]),
                 key=['1', 'X', '2'].index,

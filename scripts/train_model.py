@@ -17,7 +17,9 @@ FEATURE_COLUMNS: List[str] = [
     "P_market(1)", "P_market(X)", "P_market(2)",
     "P_elo(1)", "P_elo(X)", "P_elo(2)",
     "P_pois(1)", "P_pois(X)", "P_pois(2)",
-    "bookmaker_margin", "gap_market", "entropia_market",
+    "d_elo_1", "d_elo_X", "d_elo_2",
+    "d_pois_1", "d_pois_X", "d_pois_2",
+    "bookmaker_margin", "gap_market", "entropia_market", "draw_boost",
     "elo_diff", "elo_uncertainty_home", "elo_uncertainty_away",
     "form_home", "form_away", "form_diff",
 ]

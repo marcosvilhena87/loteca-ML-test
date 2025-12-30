@@ -80,16 +80,19 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
 
         epsilon = 1e-10
         adjusted_probabilities = probabilities + epsilon
+        sorted_probs = np.sort(adjusted_probabilities, axis=1)[:, ::-1]
+        p1 = sorted_probs[:, 0]
+        p2 = sorted_probs[:, 1]
+
+        future_df['duplo_gain'] = np.log((p1 + (1 + duo_alpha) * p2) / p1)
+        future_df['gap_final'] = p1 - p2
         future_df['entropia_final'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
-        top_two = np.sort(adjusted_probabilities, axis=1)[:, ::-1][:, :2]
-        future_df['gap_final'] = top_two[:, 0] - top_two[:, 1]
-        future_df['duplo_score'] = future_df['entropia_final'] + duo_alpha * (1 - future_df['gap_final'])
         future_df['Entropia'] = future_df['entropia_final']
 
         jogos_duplos_idxs = []
         for _, contest_indices in future_df.groupby("Concurso").groups.items():
             contest_df = future_df.loc[contest_indices]
-            top_duplos = contest_df.nlargest(5, 'duplo_score').index
+            top_duplos = contest_df.nlargest(5, 'duplo_gain').index
             jogos_duplos_idxs.extend(top_duplos)
 
         logging.info(f"Índices dos jogos mais incertos para duplos: {sorted(jogos_duplos_idxs)}")
@@ -100,7 +103,7 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
             future_df.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"
         future_df['Aposta'] = future_df['Aposta'].fillna(future_df['Secos'])
 
-        log_cols = ['Entropia', 'entropia_final', 'gap_market', 'gap_final', 'draw_boost']
+        log_cols = ['duplo_gain', 'Entropia', 'entropia_final', 'gap_market', 'gap_final', 'draw_boost']
         present_cols = [c for c in log_cols if c in future_df.columns]
         logging.info("Top-5 duplos e razões por concurso:")
         for contest, indices in future_df.groupby("Concurso").groups.items():

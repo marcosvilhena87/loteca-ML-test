@@ -19,20 +19,16 @@ class CardMetrics:
     p14_medio: float
 
 
-def _compute_entropy_and_gap(probabilities: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _select_duplo_indices(probabilities: np.ndarray, alpha: float, duplo_count: int) -> np.ndarray:
     epsilon = 1e-12
     adjusted = probabilities + epsilon
-    entropies = -np.sum(adjusted * np.log(adjusted), axis=1)
     sorted_probs = np.sort(adjusted, axis=1)[:, ::-1]
-    gaps = sorted_probs[:, 0] - sorted_probs[:, 1]
-    return entropies, gaps
+    p1 = sorted_probs[:, 0]
+    p2 = sorted_probs[:, 1]
 
-
-def _select_duplo_indices(probabilities: np.ndarray, alpha: float, duplo_count: int) -> np.ndarray:
-    entropies, gaps = _compute_entropy_and_gap(probabilities)
-    scores = entropies + alpha * (1 - gaps)
-    count = min(duplo_count, len(scores))
-    return np.argsort(scores)[::-1][:count]
+    marginal_gain = np.log((p1 + (1 + alpha) * p2) / p1)
+    count = min(duplo_count, len(marginal_gain))
+    return np.argsort(marginal_gain)[::-1][:count]
 
 
 def _build_card_frame(

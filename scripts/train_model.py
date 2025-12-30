@@ -1,6 +1,7 @@
 import logging
 import numpy as np
 import pandas as pd
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import log_loss
 from sklearn.model_selection import train_test_split
@@ -33,14 +34,19 @@ def train(input_file, model_file, scaler_file):
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
 
-        logging.info("Treinando o modelo...")
-        model = RandomForestClassifier(
+        logging.info("Treinando o modelo com calibração de probabilidades (sigmoid)...")
+        base_model = RandomForestClassifier(
             random_state=42,
             n_estimators=200,
             max_depth=12,
             min_samples_leaf=50,
             min_samples_split=100,
             class_weight='balanced'
+        )
+        model = CalibratedClassifierCV(
+            base_estimator=base_model,
+            method="sigmoid",
+            cv=5
         )
         model.fit(X_train_scaled, y_train)
 

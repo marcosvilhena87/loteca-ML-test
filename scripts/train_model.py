@@ -10,14 +10,14 @@ from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from .feature_engineering import (
     CLASSES,
     CORRECTOR_FORM_FEATURES,
-    LOG_ODDS_FEATURES,
+    CORRECTOR_MARKET_FEATURES,
     MARKET_CORRECTOR_FEATURES,
     MODEL_FEATURES,
     PROB_COLUMNS,
@@ -81,14 +81,35 @@ def train(input_file, model_file, scaler_file=None, corrector_file=None):
 
         logging.info("Dividindo os dados em treino e teste...")
         if "Concurso" in df.columns:
-            splitter = GroupShuffleSplit(test_size=0.2, random_state=42, n_splits=1)
-            train_idx, test_idx = next(splitter.split(X, y, groups=df["Concurso"]))
-            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+            concursos = pd.Index(pd.unique(df["Concurso"]))
+            concursos = pd.Index(np.sort(concursos))
+
+            if len(concursos) >= 2:
+                n_test = max(1, int(np.ceil(len(concursos) * 0.2)))
+                train_concursos = concursos[:-n_test]
+                test_concursos = concursos[-n_test:]
+
+                train_idx = df.index[df["Concurso"].isin(train_concursos)]
+                test_idx = df.index[df["Concurso"].isin(test_concursos)]
+                logging.info(
+                    "Split temporal por concurso. Treinando em %s e testando em %s",
+                    train_concursos.tolist(),
+                    test_concursos.tolist(),
+                )
+            else:
+                logging.warning(
+                    "Apenas um concurso disponível; usando divisão estratificada padrão."
+                )
+                train_idx, test_idx = train_test_split(
+                    df.index, test_size=0.2, random_state=42, stratify=y
+                )
         else:
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42, stratify=y
+            train_idx, test_idx = train_test_split(
+                df.index, test_size=0.2, random_state=42, stratify=y
             )
+
+        X_train, X_test = X.loc[train_idx], X.loc[test_idx]
+        y_train, y_test = y.loc[train_idx], y.loc[test_idx]
 
         logging.info("Treinando o modelo com calibração de probabilidades (isotonic)...")
         base_model = RandomForestClassifier(
@@ -154,7 +175,7 @@ def train(input_file, model_file, scaler_file=None, corrector_file=None):
                 (
                     "pass_probabilities",
                     "passthrough",
-                    [*PROB_COLUMNS, *LOG_ODDS_FEATURES],
+                    CORRECTOR_MARKET_FEATURES,
                 ),
             ]
         )
@@ -173,8 +194,8 @@ def train(input_file, model_file, scaler_file=None, corrector_file=None):
 
         corrector_X = df[MARKET_CORRECTOR_FEATURES]
         corrector_X_train, corrector_X_test = (
-            corrector_X.iloc[train_idx],
-            corrector_X.iloc[test_idx],
+            corrector_X.loc[train_idx],
+            corrector_X.loc[test_idx],
         )
 
         corrector_pipeline.fit(corrector_X_train, y_train)

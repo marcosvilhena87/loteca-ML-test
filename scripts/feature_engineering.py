@@ -35,19 +35,23 @@ MODEL_FEATURES = [
 ]
 
 # Features used by the "market corrector" model (stacking on top of odds)
-MARKET_CORRECTOR_FEATURES = [
-    *PROB_COLUMNS,
-    *LOG_ODDS_FEATURES,
-    'Form_Diff_Last5',
-    'Is_Home',
-    'Home_Fav',
-    'Market_vs_Form',
-]
 CORRECTOR_FORM_FEATURES = [
     'Form_Diff_Last5',
     'Is_Home',
     'Home_Fav',
     'Market_vs_Form',
+]
+CORRECTOR_MARKET_FEATURES = [
+    *PROB_COLUMNS,
+    *LOG_ODDS_FEATURES,
+    'Market_Entropy',
+    'Market_Pmax',
+    'Prob_Gap',
+    'Home_Prob_Gap',
+]
+MARKET_CORRECTOR_FEATURES = [
+    *CORRECTOR_MARKET_FEATURES,
+    *CORRECTOR_FORM_FEATURES,
 ]
 
 

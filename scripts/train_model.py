@@ -171,7 +171,10 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         def _select_best_alpha(grid_df: pd.DataFrame) -> Tuple[float, pd.DataFrame]:
             scored = grid_df.assign(proxy_score=grid_df.apply(_proxy_ev_score, axis=1))
             if "ev14_medio" in scored and scored["ev14_medio"].notna().any():
-                ordered = scored.sort_values(["ev14_medio", "pct_13", "pct_12"], ascending=False)
+                ordered = scored.sort_values(
+                    ["ev14_medio", "p14_medio", "pct_13", "pct_12"],
+                    ascending=False,
+                )
             else:
                 ordered = scored.sort_values(["proxy_score", "pct_13", "pct_12"], ascending=False)
             return float(ordered.iloc[0]["alpha"]), scored
@@ -203,15 +206,20 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
 
         ev_model = _ev14_medio(best_metrics)
         ev_market = _ev14_medio(market_metrics)
+        p14_model = best_metrics.p14_medio
+        p14_market = market_metrics.p14_medio
 
-        logging.info("Backtest de cartões (modelo vs mercado) usando proxy de EV (2*pct13 + pct12 + 0.3*cobertura + 0.1*EH):")
+        logging.info(
+            "Backtest de cartões (modelo vs mercado) com foco em EV14; proxy (2*pct13 + pct12 + 0.3*cobertura + 0.1*EH) impresso para referência:")
         for _, row in model_grid.merge(market_grid, on="alpha", suffixes=("_modelo", "_mercado")).iterrows():
             logging.info(
-                "alpha=%.2f | proxy=%.2f | EV14=%.0f vs mercado=%.0f | %%>=13 modelo=%.1f (>=12=%.1f) vs mercado=%.1f (>=12=%.1f) | cobertura=%.2f | EH=%.2f",
+                "alpha=%.2f | EV14=%.0f vs mercado=%.0f | p14=%.3f vs mercado=%.3f | proxy=%.2f | %%>=13 modelo=%.1f (>=12=%.1f) vs mercado=%.1f (>=12=%.1f) | cobertura=%.2f | EH=%.2f",
                 row["alpha"],
-                row["proxy_score_modelo"],
                 row.get("ev14_medio_modelo", 0),
                 row.get("ev14_medio_mercado", 0),
+                row.get("p14_medio_modelo", 0),
+                row.get("p14_medio_mercado", 0),
+                row["proxy_score_modelo"],
                 row["pct_13_modelo"],
                 row["pct_12_modelo"],
                 row["pct_13_mercado"],
@@ -221,16 +229,18 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             )
 
         logging.info(
-            "Alpha ótimo=%.2f (proxy=%.2f) | Modelo: EV14=%.0f, %%>=13=%.1f, %%>=12=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV14=%.0f, %%>=13=%.1f",
+            "Alpha ótimo=%.2f | Modelo: EV14=%.0f, p14=%.3f, proxy=%.2f, %%>=13=%.1f, %%>=12=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV14=%.0f, p14=%.3f, %%>=13=%.1f",
             best_alpha,
-            float(model_grid.loc[model_grid["alpha"] == best_alpha, "proxy_score"].iloc[0]),
             ev_model,
+            p14_model,
+            float(model_grid.loc[model_grid["alpha"] == best_alpha, "proxy_score"].iloc[0]),
             best_metrics.survival.get(13, 0.0),
             best_metrics.survival.get(12, 0.0),
             best_metrics.duplo_coverage,
             best_metrics.expected_hits,
             best_metrics.penalty,
             ev_market,
+            p14_market,
             market_metrics.survival.get(13, 0.0),
         )
 

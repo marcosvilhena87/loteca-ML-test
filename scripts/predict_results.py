@@ -57,6 +57,9 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
             model = model_artifact["model"]
             if feature_variant != trained_variant:
                 logging.warning("Sobrescrevendo variant treinada (%s) pela solicitada (%s).", trained_variant, feature_variant)
+            tuned_alpha = model_artifact.get("best_duplo_alpha")
+            if tuned_alpha is not None and duo_alpha == DEFAULT_DUO_ALPHA:
+                duo_alpha = tuned_alpha
         else:
             model = model_artifact
             feature_columns = get_feature_columns(feature_variant)

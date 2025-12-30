@@ -21,6 +21,9 @@ def process(input_file, output_file):
 
         logging.info("Calculando probabilidades baseadas nas odds e margem do mercado...")
         df = compute_implied_probabilities(df)
+        df['P(1)'] = df['P_market(1)']
+        df['P(X)'] = df['P_market(X)']
+        df['P(2)'] = df['P_market(2)']
 
         logging.info("Determinando os resultados reais dos jogos...")
         if all(col in df.columns for col in ['[1]', '[x]', '[2]']):

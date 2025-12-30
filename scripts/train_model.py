@@ -9,6 +9,8 @@ from sklearn.metrics import log_loss
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from .loteca_metrics import evaluate_card, summarize_alpha_grid
+
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -155,30 +157,54 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         )
         logging.info(f"Brier Score no conjunto de validação: {best_run['brier']:.4f}")
 
-        entropia_final = -np.sum(best_run["val_proba"] * np.log(best_run["val_proba"] + 1e-12), axis=1)
-        top_two = np.sort(best_run["val_proba"], axis=1)[:, ::-1][:, :2]
-        gap_final = top_two[:, 0] - top_two[:, 1]
+        alpha_grid = [0.0, 0.25, 0.5, 0.75, 1.0]
+        val_prob_cols = [f"P_final({c})" for c in CLASS_ORDER]
+        val_eval_df = pd.concat(
+            [val_df.reset_index(drop=True), pd.DataFrame(best_run["val_proba"], columns=val_prob_cols)],
+            axis=1,
+        )
 
-        def _duplo_hit_rate(alpha: float, top_k: int = 50) -> float:
-            scores = entropia_final + alpha * (1 - gap_final)
-            k = min(top_k, len(scores))
-            selected = np.argsort(scores)[::-1][:k]
-            hits = 0
-            for idx in selected:
-                top2_idx = best_run["val_proba"][idx].argsort()[::-1][:2]
-                if y_val.iloc[idx] in CLASS_ORDER[top2_idx]:
-                    hits += 1
-            return hits / k if k else 0.0
+        def _select_best_alpha(grid_df: pd.DataFrame) -> float:
+            ordered = grid_df.sort_values(["pct_13", "pct_12"], ascending=False)
+            return float(ordered.iloc[0]["alpha"])
 
-        for alpha in [0.0, 0.25, 0.5, 0.75, 1.0]:
-            hit_rate = _duplo_hit_rate(alpha)
-            logging.info(f"Hit-rate top-2 para duplos (alpha={alpha:.2f}): {hit_rate:.3f}")
+        model_grid = summarize_alpha_grid(val_eval_df, val_prob_cols, CLASS_ORDER, alpha_grid)
+        market_grid = summarize_alpha_grid(val_eval_df, [f"P_market({c})" for c in CLASS_ORDER], CLASS_ORDER, alpha_grid)
+
+        best_alpha = _select_best_alpha(model_grid)
+        best_metrics = evaluate_card(val_eval_df, val_prob_cols, CLASS_ORDER, alpha=best_alpha)
+        market_metrics = evaluate_card(val_eval_df, [f"P_market({c})" for c in CLASS_ORDER], CLASS_ORDER, alpha=best_alpha)
+
+        logging.info("Backtest de cartões (modelo vs mercado):")
+        for _, row in model_grid.merge(market_grid, on="alpha", suffixes=("_modelo", "_mercado")).iterrows():
+            logging.info(
+                "alpha=%.2f | %%>=13 modelo=%.1f (>=12=%.1f) vs mercado=%.1f (>=12=%.1f) | cobertura=%.2f | EH=%.2f",
+                row["alpha"],
+                row["pct_13_modelo"],
+                row["pct_12_modelo"],
+                row["pct_13_mercado"],
+                row["pct_12_mercado"],
+                row["duplo_coverage_modelo"],
+                row["expected_hits_modelo"],
+            )
+
+        logging.info(
+            "Alpha ótimo=%.2f | Modelo: %%>=13=%.1f, %%>=12=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado %%>=13=%.1f",
+            best_alpha,
+            best_metrics.survival.get(13, 0.0),
+            best_metrics.survival.get(12, 0.0),
+            best_metrics.duplo_coverage,
+            best_metrics.expected_hits,
+            best_metrics.penalty,
+            market_metrics.survival.get(13, 0.0),
+        )
 
         logging.info(f"Salvando o modelo em {model_file} (features={feature_variant})...")
         artifact = {
             "model": best_run["model"],
             "feature_variant": feature_variant,
             "feature_columns": feature_columns,
+            "best_duplo_alpha": best_alpha,
         }
         dump(artifact, model_file)
 

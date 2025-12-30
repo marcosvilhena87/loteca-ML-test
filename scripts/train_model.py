@@ -22,6 +22,8 @@ def _reorder_probabilities(proba: np.ndarray, classes: np.ndarray) -> np.ndarray
         raise ValueError(
             f"Classes esperadas ausentes do modelo: {missing}. Classes disponíveis: {list(classes)}"
         )
+    if len(classes) != len(set(classes)):
+        raise ValueError("Classes duplicadas detectadas no estimador.")
     return np.column_stack([proba[:, class_to_index[cls]] for cls in CLASSES])
 
 
@@ -88,11 +90,23 @@ def train(input_file, model_file, scaler_file=None):
         market_prob_test = df.loc[X_test.index, PROB_COLUMNS]
         market_preds = market_prob_test.idxmax(axis=1).map(market_to_result)
         market_accuracy = (market_preds == y_test).mean()
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Labels passed.*ordered lexicographically",
+                category=UserWarning,
+            )
+            market_logloss = log_loss(
+                y_test,
+                market_prob_test[PROB_COLUMNS].to_numpy(),
+                labels=CLASSES,
+            )
 
         logging.info(f"Acurácia no conjunto de teste: {accuracy:.4f}")
         logging.info(f"Log loss no conjunto de teste: {logloss:.4f}")
         logging.info(f"Brier score (multi-classe) no conjunto de teste: {brier:.4f}")
         logging.info(f"Acurácia baseline do mercado (seco pelas odds): {market_accuracy:.4f}")
+        logging.info(f"Log loss baseline do mercado: {market_logloss:.4f}")
 
         logging.info(f"Salvando o modelo em {model_file}...")
         dump(model, model_file)

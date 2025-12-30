@@ -29,6 +29,15 @@ MODEL_FEATURES = [
     'Home_Prob_Gap',
 ]
 
+# Features used by the "market corrector" model (stacking on top of odds)
+MARKET_CORRECTOR_FEATURES = [
+    *PROB_COLUMNS,
+    'Form_Diff_Last5',
+    'Is_Home',
+    'Home_Fav',
+    'Market_vs_Form',
+]
+
 
 def compute_probabilities(df: pd.DataFrame, *, force: bool = False) -> pd.DataFrame:
     """Compute normalized implied probabilities from odds.

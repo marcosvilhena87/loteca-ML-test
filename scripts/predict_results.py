@@ -1,10 +1,12 @@
 import logging
+from pathlib import Path
 import pandas as pd
 import numpy as np
 from joblib import load  # Para carregar os modelos previamente treinados
 
 from .feature_engineering import (
     CLASSES,
+    MARKET_CORRECTOR_FEATURES,
     MODEL_FEATURES,
     PROB_COLUMNS,
     add_domain_features,
@@ -40,7 +42,7 @@ def _pick_indices(df: pd.DataFrame, filters, sort_col: str, target: int, exclude
     return pd.Index([])
 
 
-def predict(input_file, model_file, scaler_file, output_file):
+def predict(input_file, model_file, scaler_file, output_file, corrector_file=None):
     """Generate predictions for future games and write them to CSV."""
     try:
         logging.info("Carregando dados dos jogos futuros...")
@@ -53,51 +55,76 @@ def predict(input_file, model_file, scaler_file, output_file):
         df = add_domain_features(df)
         df = df.reset_index(drop=True)
 
-        logging.info("Carregando modelo...")
+        logging.info("Carregando modelos...")
         model = load(model_file)
 
+        if corrector_file is None:
+            model_path = Path(model_file)
+            corrector_file = model_path.with_name(
+                f"{model_path.stem}_market_corrector{model_path.suffix}"
+            )
+
+        corrector_model = load(corrector_file)
+
         logging.info(f"Ordem das classes do modelo: {list(model.classes_)}")
+        logging.info(
+            "Ordem das classes do corretor: %s",
+            list(corrector_model.classes_),
+        )
 
         logging.info("Preparando dados para predição...")
         X_future = df[MODEL_FEATURES]
 
         logging.info("Gerando predições...")
-        probabilities = _reorder_probabilities(model.predict_proba(X_future), model.classes_)
-        if probabilities.shape[1] != len(CLASSES):
+        base_probabilities = _reorder_probabilities(
+            model.predict_proba(X_future), model.classes_
+        )
+        corrected_probabilities = _reorder_probabilities(
+            corrector_model.predict_proba(df[MARKET_CORRECTOR_FEATURES]),
+            corrector_model.classes_,
+        )
+
+        if corrected_probabilities.shape[1] != len(CLASSES):
             raise ValueError(
                 "Número inesperado de colunas de probabilidade após reordenar as classes."
             )
 
         logging.info("Adicionando predições ao DataFrame com mapeamento correto das classes...")
-        df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
-        df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
-        df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)
+        df['Probabilidade Modelo (1)'] = np.round(base_probabilities[:, 0], 5)
+        df['Probabilidade Modelo (X)'] = np.round(base_probabilities[:, 1], 5)
+        df['Probabilidade Modelo (2)'] = np.round(base_probabilities[:, 2], 5)
+
+        df['Probabilidade (1)'] = np.round(corrected_probabilities[:, 0], 5)
+        df['Probabilidade (X)'] = np.round(corrected_probabilities[:, 1], 5)
+        df['Probabilidade (2)'] = np.round(corrected_probabilities[:, 2], 5)
 
         market_top = df[PROB_COLUMNS].to_numpy().argmax(axis=1)
         df['Seco_Mercado'] = [CLASSES[idx] for idx in market_top]
 
-        predictions_mapped = [CLASSES[idx] for idx in probabilities.argmax(axis=1)]
-        df['Seco_Modelo'] = predictions_mapped
+        base_predictions = [CLASSES[idx] for idx in base_probabilities.argmax(axis=1)]
+        corrected_predictions = [CLASSES[idx] for idx in corrected_probabilities.argmax(axis=1)]
+        df['Seco_Modelo'] = base_predictions
+        df['Seco_Corretor'] = corrected_predictions
 
         epsilon = 1e-10
-        adjusted_probabilities = probabilities + epsilon
+        adjusted_probabilities = corrected_probabilities + epsilon
 
         logging.info("Calculando entropia para determinar os jogos mais incertos...")
         df['Entropia'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
-        df['Pmax_Modelo'] = probabilities.max(axis=1)
-        df['Score_Duplo'] = df['Entropia'] * (1 - df['Pmax_Modelo'])
+        df['Pmax_Corretor'] = corrected_probabilities.max(axis=1)
+        df['Score_Duplo'] = df['Entropia'] * (1 - df['Pmax_Corretor'])
 
         triplo_filters = [
-            lambda d: d[(d['Pmax_Modelo'] <= 0.55) & (d['Probabilidade (X)'] >= 0.20)],
-            lambda d: d[(d['Pmax_Modelo'] <= 0.65)],
+            lambda d: d[(d['Pmax_Corretor'] <= 0.55) & (d['Probabilidade (X)'] >= 0.20)],
+            lambda d: d[(d['Pmax_Corretor'] <= 0.65)],
             lambda d: d,
         ]
         jogos_triplos_idxs = _pick_indices(df, triplo_filters, 'Entropia', 3)
         logging.info("Gerando a coluna de aposta com 6 secos, 5 duplos e 3 triplos...")
 
         candidatos_duplo_filters = [
-            lambda d: d[(d['Pmax_Modelo'] <= 0.60) & (d['Probabilidade (X)'] >= 0.22)],
-            lambda d: d[(d['Pmax_Modelo'] <= 0.70) & (d['Probabilidade (X)'] >= 0.18)],
+            lambda d: d[(d['Pmax_Corretor'] <= 0.60) & (d['Probabilidade (X)'] >= 0.22)],
+            lambda d: d[(d['Pmax_Corretor'] <= 0.70) & (d['Probabilidade (X)'] >= 0.18)],
             lambda d: d,
         ]
 
@@ -111,7 +138,7 @@ def predict(input_file, model_file, scaler_file, output_file):
         logging.info(f"Índices escolhidos para triplos: {jogos_triplos_idxs.tolist()}")
         logging.info(f"Índices escolhidos para duplos: {jogos_duplos_idxs.tolist()}")
 
-        df['Aposta'] = df['Seco_Modelo']
+        df['Aposta'] = df['Seco_Corretor']
 
         df['Duplo_Modelo'] = ""
         df['Triplo_Modelo'] = ""
@@ -123,7 +150,7 @@ def predict(input_file, model_file, scaler_file, output_file):
         duplo_opcoes = ['1', 'X', '2']
         for idx in jogos_duplos_idxs:
             pos = df.index.get_loc(idx)
-            mais_provaveis = probabilities[pos].argsort()[-2:][::-1]
+            mais_provaveis = corrected_probabilities[pos].argsort()[-2:][::-1]
             duplos_ordenados = sorted(
                 (duplo_opcoes[mais_provaveis[0]], duplo_opcoes[mais_provaveis[1]]),
                 key=['1', 'X', '2'].index,

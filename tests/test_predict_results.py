@@ -18,13 +18,17 @@ def test_predict_results_output_columns(tmp_path):
 
     df = pd.read_csv(predictions_file, delimiter=';')
     expected = [
+        'Probabilidade Modelo (1)',
+        'Probabilidade Modelo (X)',
+        'Probabilidade Modelo (2)',
         'Probabilidade (1)',
         'Probabilidade (X)',
         'Probabilidade (2)',
         'Seco_Mercado',
         'Seco_Modelo',
+        'Seco_Corretor',
         'Entropia',
-        'Pmax_Modelo',
+        'Pmax_Corretor',
         'Score_Duplo',
         'Duplo_Modelo',
         'Triplo_Modelo',

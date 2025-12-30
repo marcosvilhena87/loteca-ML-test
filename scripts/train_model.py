@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -9,7 +9,7 @@ from sklearn.metrics import log_loss
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from .loteca_metrics import evaluate_card, summarize_alpha_grid
+from .loteca_metrics import evaluate_card
 from .rateio_utils import load_rateio
 
 logging.basicConfig(level=logging.INFO,
@@ -95,6 +95,12 @@ def _reorder_probas(probas: np.ndarray, source_classes: Sequence[str], target_cl
     return probas[:, index_map]
 
 
+def _winsorize_rateio(rateio_series: pd.Series, lower: float = 0.0, upper: float = 0.99) -> pd.Series:
+    lower_bound = rateio_series.quantile(lower)
+    upper_bound = rateio_series.quantile(upper)
+    return rateio_series.clip(lower=lower_bound, upper=upper_bound)
+
+
 def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAULT_FEATURE_VARIANT,
           c_values: Optional[Sequence[float]] = None):
     """Train a stacked meta-model on engineered features and persist artifacts."""
@@ -112,6 +118,11 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         train_df, val_df = _time_ordered_split(df, test_size=0.2, embargo_contests=1)
         X_train, X_val = train_df[feature_columns], val_df[feature_columns]
         y_train, y_val = train_df['Resultado'], val_df['Resultado']
+
+        rateio_df = load_rateio("data/raw/concurso_rateio.csv")
+        rateio_unique = rateio_df.drop_duplicates(subset="Concurso")
+        rateio_series = rateio_unique.set_index("Concurso")["Rateio_14"]
+        winsorized_rateio = _winsorize_rateio(rateio_series)
 
         logging.info("Montando pipeline de mistura (logistic regression multiclasse)...")
 
@@ -140,116 +151,134 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         val_market = val_df[market_cols].values
         logloss_market = log_loss(y_val, val_market, labels=CLASS_ORDER)
 
+        val_eval_base = val_df.reset_index(drop=True)
+        market_cols = [f"P_market({c})" for c in CLASS_ORDER]
+        val_eval_base = val_eval_base.merge(rateio_df[["Concurso", "Rateio_14", "Acumulou_14"]], on="Concurso", how="left")
+
+        def _ev14_medio(metrics) -> float:
+            aligned_rateio = winsorized_rateio.reindex(metrics.p14_by_contest.index).fillna(0)
+            return float((metrics.p14_by_contest * aligned_rateio).mean())
+
+        alpha_grid = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+        def _score_alphas(val_eval_df: pd.DataFrame, prob_cols: List[str]):
+            alpha_records = []
+            for alpha in alpha_grid:
+                model_metrics = evaluate_card(val_eval_df, prob_cols, CLASS_ORDER, alpha=alpha)
+                market_metrics = evaluate_card(val_eval_df, market_cols, CLASS_ORDER, alpha=alpha)
+                ev_model = _ev14_medio(model_metrics)
+                ev_market = _ev14_medio(market_metrics)
+                alpha_records.append({
+                    "alpha": alpha,
+                    "ev14_modelo": ev_model,
+                    "ev14_mercado": ev_market,
+                    "ev14_diff": ev_model - ev_market,
+                    "p14_medio_modelo": model_metrics.p14_medio,
+                    "p14_medio_mercado": market_metrics.p14_medio,
+                    "pct_13_modelo": model_metrics.survival.get(13, 0.0),
+                    "pct_12_modelo": model_metrics.survival.get(12, 0.0),
+                    "pct_13_mercado": market_metrics.survival.get(13, 0.0),
+                    "pct_12_mercado": market_metrics.survival.get(12, 0.0),
+                    "duplo_coverage_modelo": model_metrics.duplo_coverage,
+                    "expected_hits_modelo": model_metrics.expected_hits,
+                    "penalty_modelo": model_metrics.penalty,
+                    "metrics_modelo": model_metrics,
+                    "metrics_mercado": market_metrics,
+                })
+
+            alpha_df = pd.DataFrame(alpha_records)
+            ordered = alpha_df.sort_values(["ev14_diff", "p14_medio_modelo", "pct_13_modelo", "pct_12_modelo"], ascending=False)
+            best_row = ordered.iloc[0]
+            return float(best_row["alpha"]), alpha_df, best_row["metrics_modelo"], best_row["metrics_mercado"]
+
         best_run = None
         for c_val in c_grid:
             run = _fit_and_score(c_val)
             delta = logloss_market - run["logloss_model"]
-            logging.info(
-                "C=%.3g | LogLoss model=%.4f | delta vs mercado=%.4f | Brier=%.4f",
-                c_val, run["logloss_model"], delta, run["brier"],
+
+            val_prob_cols = [f"P_final({c})" for c in CLASS_ORDER]
+            val_eval_df = pd.concat(
+                [val_eval_base, pd.DataFrame(run["val_proba"], columns=val_prob_cols)],
+                axis=1,
             )
-            if best_run is None or run["logloss_model"] < best_run["logloss_model"]:
-                best_run = {"C": c_val, **run}
+
+            best_alpha, alpha_df, best_model_metrics, best_market_metrics = _score_alphas(val_eval_df, val_prob_cols)
+            ev_model = _ev14_medio(best_model_metrics)
+            ev_market = _ev14_medio(best_market_metrics)
+
+            logging.info(
+                "C=%.3g | LogLoss model=%.4f (delta=%.4f) | EV14 diff=%.2f com alpha=%.2f",
+                c_val, run["logloss_model"], delta, ev_model - ev_market, best_alpha,
+            )
+
+            run_summary = {
+                "C": c_val,
+                **run,
+                "best_alpha": best_alpha,
+                "alpha_grid": alpha_df,
+                "best_model_metrics": best_model_metrics,
+                "best_market_metrics": best_market_metrics,
+                "ev14_diff": ev_model - ev_market,
+            }
+
+            if best_run is None or run_summary["ev14_diff"] > best_run["ev14_diff"]:
+                best_run = run_summary
 
         assert best_run is not None
+
+        ev_model = _ev14_medio(best_run["best_model_metrics"])
+        ev_market = _ev14_medio(best_run["best_market_metrics"])
+        p14_model = best_run["best_model_metrics"].p14_medio
+        p14_market = best_run["best_market_metrics"].p14_medio
+
         logging.info(
-            "Melhor C=%.3g com LogLoss=%.4f (mercado=%.4f, delta=%.4f)",
-            best_run["C"], best_run["logloss_model"], logloss_market, logloss_market - best_run["logloss_model"],
+            "Melhor C=%.3g maximizando EV14 (winsorizado) | EV diff=%.2f | LogLoss=%.4f (mercado=%.4f)",
+            best_run["C"], best_run["ev14_diff"], best_run["logloss_model"], logloss_market,
         )
         logging.info(f"Brier Score no conjunto de validação: {best_run['brier']:.4f}")
 
-        alpha_grid = [0.0, 0.25, 0.5, 0.75, 1.0]
-        val_prob_cols = [f"P_final({c})" for c in CLASS_ORDER]
-        val_eval_df = pd.concat(
-            [val_df.reset_index(drop=True), pd.DataFrame(best_run["val_proba"], columns=val_prob_cols)],
-            axis=1,
-        )
-
-        def _proxy_ev_score(row: pd.Series) -> float:
-            return (2 * row["pct_13"]) + row["pct_12"] + 0.3 * row["duplo_coverage"] + 0.1 * row["expected_hits"]
-
-        def _select_best_alpha(grid_df: pd.DataFrame) -> Tuple[float, pd.DataFrame]:
-            scored = grid_df.assign(proxy_score=grid_df.apply(_proxy_ev_score, axis=1))
-            if "ev14_medio" in scored and scored["ev14_medio"].notna().any():
-                ordered = scored.sort_values(
-                    ["ev14_medio", "p14_medio", "pct_13", "pct_12"],
-                    ascending=False,
-                )
-            else:
-                ordered = scored.sort_values(["proxy_score", "pct_13", "pct_12"], ascending=False)
-            return float(ordered.iloc[0]["alpha"]), scored
-
-        rateio_df = load_rateio("data/raw/concurso_rateio.csv")
-        val_eval_df = val_eval_df.merge(rateio_df[["Concurso", "Rateio_14", "Acumulou_14"]], on="Concurso", how="left")
-
-        def _ev14_medio(metrics) -> float:
-            rateio_series = (
-                val_eval_df
-                .drop_duplicates(subset="Concurso")
-                .set_index("Concurso")["Rateio_14"]
-            )
-            aligned_rateio = rateio_series.reindex(metrics.p14_by_contest.index).fillna(0)
-            return float((metrics.p14_by_contest * aligned_rateio).mean())
-
-        model_grid = summarize_alpha_grid(
-            val_eval_df, val_prob_cols, CLASS_ORDER, alpha_grid, rateio_df=val_eval_df
-        )
-        market_grid = summarize_alpha_grid(
-            val_eval_df, [f"P_market({c})" for c in CLASS_ORDER], CLASS_ORDER, alpha_grid, rateio_df=val_eval_df
-        )
-
-        market_grid = market_grid.assign(proxy_score=market_grid.apply(_proxy_ev_score, axis=1))
-
-        best_alpha, model_grid = _select_best_alpha(model_grid)
-        best_metrics = evaluate_card(val_eval_df, val_prob_cols, CLASS_ORDER, alpha=best_alpha)
-        market_metrics = evaluate_card(val_eval_df, [f"P_market({c})" for c in CLASS_ORDER], CLASS_ORDER, alpha=best_alpha)
-
-        ev_model = _ev14_medio(best_metrics)
-        ev_market = _ev14_medio(market_metrics)
-        p14_model = best_metrics.p14_medio
-        p14_market = market_metrics.p14_medio
+        model_grid = best_run["alpha_grid"]
 
         logging.info(
-            "Backtest de cartões (modelo vs mercado) com foco em EV14; proxy (2*pct13 + pct12 + 0.3*cobertura + 0.1*EH) impresso para referência:")
-        for _, row in model_grid.merge(market_grid, on="alpha", suffixes=("_modelo", "_mercado")).iterrows():
+            "Backtest de cartões (modelo vs mercado) maximizando EV14 winsorizado:")
+        for _, row in model_grid.iterrows():
             logging.info(
-                "alpha=%.2f | EV14=%.0f vs mercado=%.0f | p14=%.3f vs mercado=%.3f | proxy=%.2f | %%>=13 modelo=%.1f (>=12=%.1f) vs mercado=%.1f (>=12=%.1f) | cobertura=%.2f | EH=%.2f",
+                "alpha=%.2f | EV14 diff=%.2f (modelo=%.0f vs mercado=%.0f) | p14=%.3f vs mercado=%.3f | %>=13 modelo=%.1f (>=12=%.1f) vs mercado=%.1f (>=12=%.1f) | cobertura=%.2f | EH=%.2f | Penalidade=%.2f",
                 row["alpha"],
-                row.get("ev14_medio_modelo", 0),
-                row.get("ev14_medio_mercado", 0),
-                row.get("p14_medio_modelo", 0),
-                row.get("p14_medio_mercado", 0),
-                row["proxy_score_modelo"],
+                row["ev14_diff"],
+                row["ev14_modelo"],
+                row["ev14_mercado"],
+                row["p14_medio_modelo"],
+                row["p14_medio_mercado"],
                 row["pct_13_modelo"],
                 row["pct_12_modelo"],
                 row["pct_13_mercado"],
                 row["pct_12_mercado"],
                 row["duplo_coverage_modelo"],
                 row["expected_hits_modelo"],
+                row["penalty_modelo"],
             )
 
         logging.info(
-            "Alpha ótimo=%.2f | Modelo: EV14=%.0f, p14=%.3f, proxy=%.2f, %%>=13=%.1f, %%>=12=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV14=%.0f, p14=%.3f, %%>=13=%.1f",
-            best_alpha,
+            "Alpha ótimo=%.2f | Modelo: EV14=%.0f, p14=%.3f, %>=13=%.1f, %>=12=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV14=%.0f, p14=%.3f, %>=13=%.1f",
+            best_run["best_alpha"],
             ev_model,
             p14_model,
-            float(model_grid.loc[model_grid["alpha"] == best_alpha, "proxy_score"].iloc[0]),
-            best_metrics.survival.get(13, 0.0),
-            best_metrics.survival.get(12, 0.0),
-            best_metrics.duplo_coverage,
-            best_metrics.expected_hits,
-            best_metrics.penalty,
+            best_run["best_model_metrics"].survival.get(13, 0.0),
+            best_run["best_model_metrics"].survival.get(12, 0.0),
+            best_run["best_model_metrics"].duplo_coverage,
+            best_run["best_model_metrics"].expected_hits,
+            best_run["best_model_metrics"].penalty,
             ev_market,
             p14_market,
-            market_metrics.survival.get(13, 0.0),
+            best_run["best_market_metrics"].survival.get(13, 0.0),
         )
-
         logging.info(f"Salvando o modelo em {model_file} (features={feature_variant})...")
         artifact = {
             "model": best_run["model"],
             "feature_variant": feature_variant,
             "feature_columns": feature_columns,
-            "best_duplo_alpha": best_alpha,
+            "best_duplo_alpha": best_run["best_alpha"],
         }
         dump(artifact, model_file)
 

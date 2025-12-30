@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from joblib import dump  # Usando joblib para salvar os modelos
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss
@@ -15,6 +16,8 @@ from sklearn.preprocessing import StandardScaler
 
 from .feature_engineering import (
     CLASSES,
+    CORRECTOR_FORM_FEATURES,
+    LOG_ODDS_FEATURES,
     MARKET_CORRECTOR_FEATURES,
     MODEL_FEATURES,
     PROB_COLUMNS,
@@ -145,15 +148,23 @@ def train(input_file, model_file, scaler_file=None, corrector_file=None):
         )
 
         logging.info("Treinando modelo corretor do mercado (LogisticRegression)...")
+        corrector_transformer = ColumnTransformer(
+            [
+                ("form_scaler", StandardScaler(), CORRECTOR_FORM_FEATURES),
+                (
+                    "pass_probabilities",
+                    "passthrough",
+                    [*PROB_COLUMNS, *LOG_ODDS_FEATURES],
+                ),
+            ]
+        )
         corrector_pipeline = Pipeline([
-            ("scaler", StandardScaler()),
+            ("preprocess", corrector_transformer),
             (
                 "clf",
                 LogisticRegression(
-                    multi_class="multinomial",
                     solver="lbfgs",
                     max_iter=500,
-                    class_weight="balanced",
                     n_jobs=-1,
                     random_state=42,
                 ),

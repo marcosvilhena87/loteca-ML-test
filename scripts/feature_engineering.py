@@ -14,6 +14,11 @@ ALTERNATIVE_FORM_COLUMNS = {
 }
 HOME_VALUES = {'mandante', 'h', 'home'}
 MARKET_MAP = {'P(1)': 1, 'P(X)': 0, 'P(2)': -1}
+LOG_ODDS_FEATURES = [
+    'LogOdds_P1_P2',
+    'LogOdds_P1_PX',
+    'LogOdds_P2_PX',
+]
 
 # Features consumed by the model
 MODEL_FEATURES = [
@@ -32,6 +37,13 @@ MODEL_FEATURES = [
 # Features used by the "market corrector" model (stacking on top of odds)
 MARKET_CORRECTOR_FEATURES = [
     *PROB_COLUMNS,
+    *LOG_ODDS_FEATURES,
+    'Form_Diff_Last5',
+    'Is_Home',
+    'Home_Fav',
+    'Market_vs_Form',
+]
+CORRECTOR_FORM_FEATURES = [
     'Form_Diff_Last5',
     'Is_Home',
     'Home_Fav',
@@ -109,4 +121,8 @@ def add_domain_features(df: pd.DataFrame) -> pd.DataFrame:
     df['Odds_Ratio_1_2'] = df['Odds 1'] / df['Odds 2']
     df['Log_Odds_Ratio_1_2'] = np.log(df['Odds_Ratio_1_2'].replace(0, np.nan)).fillna(0)
     df['Home_Prob_Gap'] = df['Is_Home'] * df['Prob_Gap']
+
+    df['LogOdds_P1_P2'] = np.log(df['P(1)'].clip(lower=epsilon) / df['P(2)'].clip(lower=epsilon))
+    df['LogOdds_P1_PX'] = np.log(df['P(1)'].clip(lower=epsilon) / df['P(X)'].clip(lower=epsilon))
+    df['LogOdds_P2_PX'] = np.log(df['P(2)'].clip(lower=epsilon) / df['P(X)'].clip(lower=epsilon))
     return df

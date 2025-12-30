@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -164,22 +164,29 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             axis=1,
         )
 
-        def _select_best_alpha(grid_df: pd.DataFrame) -> float:
-            ordered = grid_df.sort_values(["pct_13", "pct_12"], ascending=False)
-            return float(ordered.iloc[0]["alpha"])
+        def _proxy_ev_score(row: pd.Series) -> float:
+            return (2 * row["pct_13"]) + row["pct_12"] + 0.1 * row["expected_hits"] - 0.1 * row["penalty"]
+
+        def _select_best_alpha(grid_df: pd.DataFrame) -> Tuple[float, pd.DataFrame]:
+            scored = grid_df.assign(proxy_score=grid_df.apply(_proxy_ev_score, axis=1))
+            ordered = scored.sort_values(["proxy_score", "pct_13", "pct_12"], ascending=False)
+            return float(ordered.iloc[0]["alpha"]), scored
 
         model_grid = summarize_alpha_grid(val_eval_df, val_prob_cols, CLASS_ORDER, alpha_grid)
         market_grid = summarize_alpha_grid(val_eval_df, [f"P_market({c})" for c in CLASS_ORDER], CLASS_ORDER, alpha_grid)
 
-        best_alpha = _select_best_alpha(model_grid)
+        market_grid = market_grid.assign(proxy_score=market_grid.apply(_proxy_ev_score, axis=1))
+
+        best_alpha, model_grid = _select_best_alpha(model_grid)
         best_metrics = evaluate_card(val_eval_df, val_prob_cols, CLASS_ORDER, alpha=best_alpha)
         market_metrics = evaluate_card(val_eval_df, [f"P_market({c})" for c in CLASS_ORDER], CLASS_ORDER, alpha=best_alpha)
 
-        logging.info("Backtest de cartões (modelo vs mercado):")
+        logging.info("Backtest de cartões (modelo vs mercado) usando proxy de EV (2*pct13 + pct12 + 0.1*EH - 0.1*penalty):")
         for _, row in model_grid.merge(market_grid, on="alpha", suffixes=("_modelo", "_mercado")).iterrows():
             logging.info(
-                "alpha=%.2f | %%>=13 modelo=%.1f (>=12=%.1f) vs mercado=%.1f (>=12=%.1f) | cobertura=%.2f | EH=%.2f",
+                "alpha=%.2f | proxy=%.2f | %%>=13 modelo=%.1f (>=12=%.1f) vs mercado=%.1f (>=12=%.1f) | cobertura=%.2f | EH=%.2f",
                 row["alpha"],
+                row["proxy_score_modelo"],
                 row["pct_13_modelo"],
                 row["pct_12_modelo"],
                 row["pct_13_mercado"],
@@ -189,8 +196,9 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             )
 
         logging.info(
-            "Alpha ótimo=%.2f | Modelo: %%>=13=%.1f, %%>=12=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado %%>=13=%.1f",
+            "Alpha ótimo=%.2f (proxy=%.2f) | Modelo: %%>=13=%.1f, %%>=12=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado %%>=13=%.1f",
             best_alpha,
+            float(model_grid.loc[model_grid["alpha"] == best_alpha, "proxy_score"].iloc[0]),
             best_metrics.survival.get(13, 0.0),
             best_metrics.survival.get(12, 0.0),
             best_metrics.duplo_coverage,

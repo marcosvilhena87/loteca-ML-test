@@ -47,11 +47,11 @@ process(
 train(
     'data/processed/loteca_treinamento.csv',
     'models/final_model.pkl',
-    'models/scaler.pkl')
+    None)
 predict(
     'data/raw/proximo_concurso.csv',
     'models/final_model.pkl',
-    'models/scaler.pkl',
+    None,
     'output/predictions.csv')
 PY
 ```

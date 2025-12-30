@@ -17,9 +17,7 @@ FEATURE_COLUMNS: List[str] = [
     "P_market(1)", "P_market(X)", "P_market(2)",
     "P_elo(1)", "P_elo(X)", "P_elo(2)",
     "P_pois(1)", "P_pois(X)", "P_pois(2)",
-    "d_elo_1", "d_elo_X", "d_elo_2",
-    "d_pois_1", "d_pois_X", "d_pois_2",
-    "bookmaker_margin", "gap_market", "entropia_market", "draw_boost",
+    "bookmaker_margin", "gap_market", "entropia_market",
     "elo_diff", "elo_uncertainty_home", "elo_uncertainty_away",
     "form_home", "form_away", "form_diff",
 ]
@@ -79,7 +77,7 @@ def train(input_file, model_file, scaler_file=None):
         logging.info("Montando pipeline de mistura (logistic regression multiclasse)...")
         model = Pipeline([
             ("scaler", StandardScaler()),
-            ("clf", LogisticRegression(max_iter=500, class_weight='balanced')),
+            ("clf", LogisticRegression(max_iter=500)),
         ])
 
         model.fit(X_train, y_train)
@@ -107,7 +105,7 @@ def train(input_file, model_file, scaler_file=None):
         top_two = np.sort(val_proba, axis=1)[:, ::-1][:, :2]
         gap_final = top_two[:, 0] - top_two[:, 1]
 
-        def _duplo_hit_rate(alpha: float, top_k: int = 5) -> float:
+        def _duplo_hit_rate(alpha: float, top_k: int = 50) -> float:
             scores = entropia_final + alpha * (1 - gap_final)
             k = min(top_k, len(scores))
             selected = np.argsort(scores)[::-1][:k]

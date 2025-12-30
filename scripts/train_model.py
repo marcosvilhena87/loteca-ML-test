@@ -1,20 +1,31 @@
 import logging
+import warnings
 import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import log_loss
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from joblib import dump  # Usando joblib para salvar os modelos
 
-from .feature_engineering import MODEL_FEATURES
+from .feature_engineering import CLASSES, MODEL_FEATURES
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-def train(input_file, model_file, scaler_file):
+def _reorder_probabilities(proba: np.ndarray, classes: np.ndarray) -> np.ndarray:
+    """Return probability matrix with columns aligned to ``CLASSES`` order."""
+    class_to_index = {cls: idx for idx, cls in enumerate(classes)}
+    missing = [cls for cls in CLASSES if cls not in class_to_index]
+    if missing:
+        raise ValueError(
+            f"Classes esperadas ausentes do modelo: {missing}. Classes disponíveis: {list(classes)}"
+        )
+    return np.column_stack([proba[:, class_to_index[cls]] for cls in CLASSES])
+
+
+def train(input_file, model_file, scaler_file=None):
     """Train a classifier on processed data and persist artifacts."""
     try:
         logging.info("Carregando os dados de entrada...")
@@ -25,14 +36,15 @@ def train(input_file, model_file, scaler_file):
         y = df['Resultado']
 
         logging.info("Dividindo os dados em treino e teste...")
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
-
-        logging.info("Escalando as features...")
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
+        if "Concurso" in df.columns:
+            splitter = GroupShuffleSplit(test_size=0.2, random_state=42, n_splits=1)
+            train_idx, test_idx = next(splitter.split(X, y, groups=df["Concurso"]))
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        else:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42, stratify=y
+            )
 
         logging.info("Treinando o modelo com calibração de probabilidades (sigmoid)...")
         base_model = RandomForestClassifier(
@@ -48,25 +60,31 @@ def train(input_file, model_file, scaler_file):
             method="sigmoid",
             cv=5
         )
-        model.fit(X_train_scaled, y_train)
+        model.fit(X_train, y_train)
 
         logging.info(f"Ordem das classes aprendida pelo modelo: {list(model.classes_)}")
 
         logging.info("Calculando métricas de avaliação...")
-        y_test_proba = model.predict_proba(X_test_scaled)
-        accuracy = model.score(X_test_scaled, y_test)
-        logloss = log_loss(y_test, y_test_proba, labels=model.classes_)
+        y_test_proba_raw = model.predict_proba(X_test)
+        y_test_proba = _reorder_probabilities(y_test_proba_raw, model.classes_)
+        accuracy = model.score(X_test, y_test)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Labels passed.*ordered lexicographically",
+                category=UserWarning,
+            )
+            logloss = log_loss(y_test, y_test_proba, labels=CLASSES)
 
-        true_one_hot = pd.get_dummies(y_test).reindex(columns=model.classes_, fill_value=0).values
+        true_one_hot = pd.get_dummies(y_test).reindex(columns=CLASSES, fill_value=0).values
         brier = np.mean(np.sum((true_one_hot - y_test_proba) ** 2, axis=1))
 
         logging.info(f"Acurácia no conjunto de teste: {accuracy:.4f}")
         logging.info(f"Log loss no conjunto de teste: {logloss:.4f}")
         logging.info(f"Brier score (multi-classe) no conjunto de teste: {brier:.4f}")
 
-        logging.info(f"Salvando o modelo em {model_file} e o scaler em {scaler_file}...")
+        logging.info(f"Salvando o modelo em {model_file}...")
         dump(model, model_file)
-        dump(scaler, scaler_file)
 
         logging.info("Treinamento concluído com sucesso!")
 

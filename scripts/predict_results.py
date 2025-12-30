@@ -4,6 +4,7 @@ import numpy as np
 from joblib import load  # Para carregar os modelos previamente treinados
 
 from .feature_engineering import (
+    CLASSES,
     MODEL_FEATURES,
     add_domain_features,
     compute_probabilities,
@@ -11,6 +12,17 @@ from .feature_engineering import (
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
+
+
+def _reorder_probabilities(proba: np.ndarray, classes: np.ndarray) -> np.ndarray:
+    """Return probability matrix with columns aligned to ``CLASSES`` order."""
+    class_to_index = {cls: idx for idx, cls in enumerate(classes)}
+    missing = [cls for cls in CLASSES if cls not in class_to_index]
+    if missing:
+        raise ValueError(
+            f"Classes esperadas ausentes do modelo: {missing}. Classes disponíveis: {list(classes)}"
+        )
+    return np.column_stack([proba[:, class_to_index[cls]] for cls in CLASSES])
 
 
 def predict(input_file, model_file, scaler_file, output_file):
@@ -25,38 +37,23 @@ def predict(input_file, model_file, scaler_file, output_file):
         logging.info("Criando features específicas da Loteca...")
         df = add_domain_features(df)
 
-        logging.info("Carregando modelo e scaler...")
+        logging.info("Carregando modelo...")
         model = load(model_file)
-        scaler = load(scaler_file)
 
         logging.info(f"Ordem das classes do modelo: {list(model.classes_)}")
 
         logging.info("Preparando dados para predição...")
         X_future = df[MODEL_FEATURES]
-        X_future_scaled = scaler.transform(X_future)
 
         logging.info("Gerando predições...")
-        raw_probabilities = model.predict_proba(X_future_scaled)
-
-        expected_classes = ['1', 'X', '2']
-        class_to_index = {cls: idx for idx, cls in enumerate(model.classes_)}
-        missing_classes = [cls for cls in expected_classes if cls not in class_to_index]
-        if missing_classes:
-            raise ValueError(
-                f"Classes esperadas ausentes do modelo: {missing_classes}. "
-                f"Classes disponíveis: {list(model.classes_)}"
-            )
-
-        probabilities = np.column_stack(
-            [raw_probabilities[:, class_to_index[cls]] for cls in expected_classes]
-        )
+        probabilities = _reorder_probabilities(model.predict_proba(X_future), model.classes_)
 
         logging.info("Adicionando predições ao DataFrame com mapeamento correto das classes...")
         df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
         df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
         df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)
 
-        predictions_mapped = [expected_classes[idx] for idx in probabilities.argmax(axis=1)]
+        predictions_mapped = [CLASSES[idx] for idx in probabilities.argmax(axis=1)]
         df['Seco'] = predictions_mapped
 
         epsilon = 1e-10
@@ -67,7 +64,13 @@ def predict(input_file, model_file, scaler_file, output_file):
         df['Pmax_Modelo'] = probabilities.max(axis=1)
         df['Score_Duplo'] = df['Entropia'] * (1 - df['Pmax_Modelo'])
 
-        jogos_duplos_idxs = df.nlargest(5, 'Score_Duplo').index
+        candidatos = df[(df['Pmax_Modelo'] <= 0.60) & (df['Probabilidade (X)'] >= 0.22)]
+        if len(candidatos) < 5:
+            candidatos = df[(df['Pmax_Modelo'] <= 0.70) & (df['Probabilidade (X)'] >= 0.18)]
+        if len(candidatos) < 5:
+            candidatos = df
+
+        jogos_duplos_idxs = candidatos.nlargest(5, 'Score_Duplo').index
         logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")
 
         logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")

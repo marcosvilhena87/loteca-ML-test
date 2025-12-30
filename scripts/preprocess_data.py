@@ -6,13 +6,14 @@ from .feature_engineering import (
     add_domain_features,
     compute_probabilities,
 )
+from .rateio_utils import load_rateio
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-def process(input_file, output_file):
-    """Clean historical data and compute probabilities and features."""
+def process(input_file, output_file, rateio_file=None):
+    """Clean historical data, compute probabilities and features, and optionally merge rateio."""
     try:
         logging.info("Carregando dados de entrada...")
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
@@ -33,6 +34,12 @@ def process(input_file, output_file):
 
         logging.info("Criando features específicas da Loteca...")
         df = add_domain_features(df)
+
+        if rateio_file and "Concurso" in df.columns:
+            logging.info("Carregando e unindo dados de rateio por concurso...")
+            rateio = load_rateio(rateio_file)
+            df["Concurso"] = pd.to_numeric(df["Concurso"], errors="coerce").astype("Int64")
+            df = df.merge(rateio, on="Concurso", how="left")
 
         logging.info("Removendo linhas inválidas...")
         df = df.dropna(subset=['Resultado'] + MODEL_FEATURES)

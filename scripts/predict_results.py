@@ -26,6 +26,18 @@ def _reorder_probabilities(proba: np.ndarray, classes: np.ndarray) -> np.ndarray
     return np.column_stack([proba[:, class_to_index[cls]] for cls in CLASSES])
 
 
+def _pick_indices(df: pd.DataFrame, filters, sort_col: str, target: int, exclude=None):
+    """Pick indices using successive filters until ``target`` rows are found."""
+
+    available = df if exclude is None else df.drop(index=exclude)
+
+    for i, filter_step in enumerate(filters):
+        subset = filter_step(available)
+        if len(subset) >= target or i == len(filters) - 1:
+            return subset.nlargest(target, sort_col).index
+    return pd.Index([])
+
+
 def predict(input_file, model_file, scaler_file, output_file):
     """Generate predictions for future games and write them to CSV."""
     try:
@@ -68,19 +80,38 @@ def predict(input_file, model_file, scaler_file, output_file):
         df['Pmax_Modelo'] = probabilities.max(axis=1)
         df['Score_Duplo'] = df['Entropia'] * (1 - df['Pmax_Modelo'])
 
-        candidatos = df[(df['Pmax_Modelo'] <= 0.60) & (df['Probabilidade (X)'] >= 0.22)]
-        if len(candidatos) < 5:
-            candidatos = df[(df['Pmax_Modelo'] <= 0.70) & (df['Probabilidade (X)'] >= 0.18)]
-        if len(candidatos) < 5:
-            candidatos = df
+        triplo_filters = [
+            lambda d: d[(d['Pmax_Modelo'] <= 0.55) & (d['Probabilidade (X)'] >= 0.20)],
+            lambda d: d[(d['Pmax_Modelo'] <= 0.65)],
+            lambda d: d,
+        ]
+        jogos_triplos_idxs = _pick_indices(df, triplo_filters, 'Entropia', 3)
+        logging.info("Gerando a coluna de aposta com 6 secos, 5 duplos e 3 triplos...")
 
-        jogos_duplos_idxs = candidatos.nlargest(5, 'Score_Duplo').index
-        logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")
+        candidatos_duplo_filters = [
+            lambda d: d[(d['Pmax_Modelo'] <= 0.60) & (d['Probabilidade (X)'] >= 0.22)],
+            lambda d: d[(d['Pmax_Modelo'] <= 0.70) & (d['Probabilidade (X)'] >= 0.18)],
+            lambda d: d,
+        ]
 
-        logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
+        jogos_duplos_idxs = _pick_indices(
+            df,
+            candidatos_duplo_filters,
+            'Score_Duplo',
+            5,
+            exclude=jogos_triplos_idxs,
+        )
+        logging.info(f"Índices escolhidos para triplos: {jogos_triplos_idxs.tolist()}")
+        logging.info(f"Índices escolhidos para duplos: {jogos_duplos_idxs.tolist()}")
+
         df['Aposta'] = df['Seco_Mercado']
 
         df['Duplo_Modelo'] = ""
+        df['Triplo_Modelo'] = ""
+
+        for idx in jogos_triplos_idxs:
+            df.loc[idx, 'Aposta'] = '1, X, 2'
+            df.loc[idx, 'Triplo_Modelo'] = '1, X, 2'
 
         duplo_opcoes = ['1', 'X', '2']
         for idx in jogos_duplos_idxs:

@@ -27,6 +27,7 @@ def test_predict_results_output_columns(tmp_path):
         'Pmax_Modelo',
         'Score_Duplo',
         'Duplo_Modelo',
+        'Triplo_Modelo',
         'Aposta'
     ]
     for col in expected:

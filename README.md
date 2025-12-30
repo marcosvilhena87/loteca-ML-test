@@ -75,9 +75,10 @@ Recent experiments show that the calibrated model (isotonic regression) is bette
 
 - **Single (seco) picks:** follow the market baseline via the `Seco_Mercado` column, which is the argmax of the implied probabilities from odds.
 - **Double picks:** rely on the model to decide where to open doubles. The prediction step exposes `Entropia`, `Pmax_Modelo` and `Score_Duplo` to rank candidates and fills `Duplo_Modelo` with the two outcomes with the highest model probabilities.
+- **Triple picks:** the three most uncertain matches (highest entropy/lowest `Pmax_Modelo`) are fully covered in `Triplo_Modelo`, ensuring coverage where the model and odds show little separation.
 - **Anti-spray filters:** keep the existing safeguards to avoid over-distributing doubles; they are aligned with the model’s calibrated probabilities.
 
-This division of labor lets the market guide deterministic picks while the model highlights the best opportunities to broaden coverage. The `Aposta` column applies this mix, starting from `Seco_Mercado` and replacing five matches with the `Duplo_Modelo` combinations selected via `Score_Duplo`.
+This division of labor lets the market guide deterministic picks while the model highlights the best opportunities to broaden coverage. The `Aposta` column applies this mix, starting from `Seco_Mercado`, assigning three triplos, and replacing five other matches with the `Duplo_Modelo` combinations selected via `Score_Duplo`.
 
 ## License
 

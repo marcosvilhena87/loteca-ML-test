@@ -73,11 +73,11 @@ pytest
 
 Recent experiments show that the calibrated model (isotonic regression) is better calibrated than the market but does not outperform market odds for single-result picks. Use the outputs accordingly:
 
-- **Single (seco) picks:** follow the market baseline, which selects the outcome with the highest implied probability from the odds.
-- **Double picks:** rely on the model to decide where to open doubles. The prediction step already exposes entropy and `pmax_model` so you can target high-uncertainty matches and cover the two outcomes with the largest model probabilities.
+- **Single (seco) picks:** follow the market baseline via the `Seco_Mercado` column, which is the argmax of the implied probabilities from odds.
+- **Double picks:** rely on the model to decide where to open doubles. The prediction step exposes `Entropia`, `Pmax_Modelo` and `Score_Duplo` to rank candidates and fills `Duplo_Modelo` with the two outcomes with the highest model probabilities.
 - **Anti-spray filters:** keep the existing safeguards to avoid over-distributing doubles; they are aligned with the model’s calibrated probabilities.
 
-This division of labor lets the market guide deterministic picks while the model highlights the best opportunities to broaden coverage.
+This division of labor lets the market guide deterministic picks while the model highlights the best opportunities to broaden coverage. The `Aposta` column applies this mix, starting from `Seco_Mercado` and replacing five matches with the `Duplo_Modelo` combinations selected via `Score_Duplo`.
 
 ## License
 

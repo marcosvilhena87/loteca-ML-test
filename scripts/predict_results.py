@@ -6,6 +6,7 @@ from joblib import load  # Para carregar os modelos previamente treinados
 from .feature_engineering import (
     CLASSES,
     MODEL_FEATURES,
+    PROB_COLUMNS,
     add_domain_features,
     compute_probabilities,
 )
@@ -53,8 +54,11 @@ def predict(input_file, model_file, scaler_file, output_file):
         df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
         df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)
 
+        market_top = df[PROB_COLUMNS].to_numpy().argmax(axis=1)
+        df['Seco_Mercado'] = [CLASSES[idx] for idx in market_top]
+
         predictions_mapped = [CLASSES[idx] for idx in probabilities.argmax(axis=1)]
-        df['Seco'] = predictions_mapped
+        df['Seco_Modelo'] = predictions_mapped
 
         epsilon = 1e-10
         adjusted_probabilities = probabilities + epsilon
@@ -74,7 +78,9 @@ def predict(input_file, model_file, scaler_file, output_file):
         logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")
 
         logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
-        df['Aposta'] = df['Seco']
+        df['Aposta'] = df['Seco_Mercado']
+
+        df['Duplo_Modelo'] = ""
 
         duplo_opcoes = ['1', 'X', '2']
         for idx in jogos_duplos_idxs:
@@ -83,7 +89,9 @@ def predict(input_file, model_file, scaler_file, output_file):
                 (duplo_opcoes[mais_provaveis[0]], duplo_opcoes[mais_provaveis[1]]),
                 key=['1', 'X', '2'].index,
             )
-            df.loc[idx, 'Aposta'] = ", ".join(duplos_ordenados)
+            duplo = ", ".join(duplos_ordenados)
+            df.loc[idx, 'Aposta'] = duplo
+            df.loc[idx, 'Duplo_Modelo'] = duplo
 
         logging.info(f"Salvando predições no arquivo {output_file}...")
         df.to_csv(output_file, sep=';', index=False)

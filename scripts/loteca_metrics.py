@@ -186,6 +186,7 @@ def summarize_alpha_grid(
             "expected_hits": metrics.expected_hits,
             "penalty": metrics.penalty,
             "ev14_medio": _ev14_mean(metrics.p14_by_contest),
+            "p14_medio": metrics.p14_medio,
         }
         records.append(record)
     return pd.DataFrame(records)

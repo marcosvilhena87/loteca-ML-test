@@ -94,7 +94,7 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
 
         logging.info(f"Índices dos jogos mais incertos para duplos: {sorted(jogos_duplos_idxs)}")
 
-        duplo_opcoes = list(classes)
+        duplo_opcoes = list(CLASS_ORDER)
         for idx in jogos_duplos_idxs:
             mais_provaveis = adjusted_probabilities[idx].argsort()[-2:][::-1]
             future_df.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"

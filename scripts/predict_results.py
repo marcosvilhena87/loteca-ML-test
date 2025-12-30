@@ -23,6 +23,8 @@ def _reorder_probabilities(proba: np.ndarray, classes: np.ndarray) -> np.ndarray
         raise ValueError(
             f"Classes esperadas ausentes do modelo: {missing}. Classes disponíveis: {list(classes)}"
         )
+    if len(classes) != len(set(classes)):
+        raise ValueError("Classes duplicadas detectadas no estimador.")
     return np.column_stack([proba[:, class_to_index[cls]] for cls in CLASSES])
 
 
@@ -49,6 +51,7 @@ def predict(input_file, model_file, scaler_file, output_file):
 
         logging.info("Criando features específicas da Loteca...")
         df = add_domain_features(df)
+        df = df.reset_index(drop=True)
 
         logging.info("Carregando modelo...")
         model = load(model_file)
@@ -60,6 +63,10 @@ def predict(input_file, model_file, scaler_file, output_file):
 
         logging.info("Gerando predições...")
         probabilities = _reorder_probabilities(model.predict_proba(X_future), model.classes_)
+        if probabilities.shape[1] != len(CLASSES):
+            raise ValueError(
+                "Número inesperado de colunas de probabilidade após reordenar as classes."
+            )
 
         logging.info("Adicionando predições ao DataFrame com mapeamento correto das classes...")
         df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
@@ -104,7 +111,7 @@ def predict(input_file, model_file, scaler_file, output_file):
         logging.info(f"Índices escolhidos para triplos: {jogos_triplos_idxs.tolist()}")
         logging.info(f"Índices escolhidos para duplos: {jogos_duplos_idxs.tolist()}")
 
-        df['Aposta'] = df['Seco_Mercado']
+        df['Aposta'] = df['Seco_Modelo']
 
         df['Duplo_Modelo'] = ""
         df['Triplo_Modelo'] = ""
@@ -115,7 +122,8 @@ def predict(input_file, model_file, scaler_file, output_file):
 
         duplo_opcoes = ['1', 'X', '2']
         for idx in jogos_duplos_idxs:
-            mais_provaveis = probabilities[idx].argsort()[-2:][::-1]
+            pos = df.index.get_loc(idx)
+            mais_provaveis = probabilities[pos].argsort()[-2:][::-1]
             duplos_ordenados = sorted(
                 (duplo_opcoes[mais_provaveis[0]], duplo_opcoes[mais_provaveis[1]]),
                 key=['1', 'X', '2'].index,

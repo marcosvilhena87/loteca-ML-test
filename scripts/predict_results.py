@@ -8,6 +8,7 @@ from .features import (RatingEngine, compute_expert_differences,
                        compute_implied_probabilities, enrich_features)
 from .train_model import (CLASS_ORDER, DEFAULT_FEATURE_VARIANT, get_feature_columns,
                           _reorder_probas)
+from .loteca_metrics import compute_hit_probabilities
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -90,11 +91,18 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
 
         marginal_records = []
         for contest, contest_indices in future_df.groupby("Concurso").groups.items():
-            base_p14 = float(np.prod(p1[contest_indices]))
-            if base_p14 == 0:
-                base_p14 = epsilon
-            for idx in contest_indices:
-                marginal_gain = base_p14 * ((p1[idx] + (1 + duo_alpha) * p2[idx]) / p1[idx] - 1)
+            contest_indices = list(contest_indices)
+            base_probs = [float(p1[idx]) for idx in contest_indices]
+            base_hits = compute_hit_probabilities(base_probs)
+            base_ev_total = base_hits[14] + base_hits[13]
+
+            for local_pos, idx in enumerate(contest_indices):
+                duplo_prob = min(1.0, float(p1[idx] + p2[idx]))
+                adjusted_probs = base_probs.copy()
+                adjusted_probs[local_pos] = duplo_prob
+                duplo_hits = compute_hit_probabilities(adjusted_probs)
+                duplo_ev_total = duplo_hits[14] + duplo_hits[13]
+                marginal_gain = duplo_ev_total - base_ev_total
                 marginal_records.append((idx, marginal_gain, contest))
 
         marginal_df = pd.DataFrame(marginal_records, columns=["idx", "duplo_gain", "Concurso"])

@@ -17,6 +17,28 @@ class CardMetrics:
     hits_by_contest: pd.Series
     p14_by_contest: pd.Series
     p14_medio: float
+    p13_by_contest: pd.Series
+    p13_medio: float
+
+
+def _exact_hit_distribution(probabilities: Sequence[float]) -> List[float]:
+    max_hits = len(probabilities)
+    dp = [1.0] + [0.0] * max_hits
+
+    for p in probabilities:
+        for k in range(max_hits, 0, -1):
+            dp[k] = dp[k] * (1 - p) + dp[k - 1] * p
+        dp[0] = dp[0] * (1 - p)
+
+    return dp
+
+
+def compute_hit_probabilities(probabilities: Sequence[float]) -> dict[int, float]:
+    distribution = _exact_hit_distribution(probabilities)
+    return {
+        target: distribution[target] if len(distribution) > target else 0.0
+        for target in (13, 14)
+    }
 
 
 def _select_duplo_indices(probabilities: np.ndarray, alpha: float, duplo_count: int) -> np.ndarray:
@@ -116,7 +138,7 @@ def evaluate_card(
     class_order: Sequence[str],
     alpha: float,
     duplo_count: int = 5,
-    survival_thresholds: Sequence[int] = (14, 13, 12),
+    survival_thresholds: Sequence[int] = (14, 13),
 ) -> CardMetrics:
     probabilities = df[list(prob_columns)].to_numpy(dtype=float)
     card_df = _build_card_frame(df.reset_index(drop=True), probabilities, class_order, alpha, duplo_count)
@@ -134,8 +156,12 @@ def evaluate_card(
     coverage = _coverage_ratio(card_df)
     expected_hits = _expected_hits_per_contest(card_df).mean()
     penalty = _compute_penalty(card_df).groupby(card_df["Concurso"]).sum().mean()
-    p14_by_contest = card_df.groupby("Concurso")["Prob_cover"].prod()
+    contest_probabilities = card_df.groupby("Concurso")["Prob_cover"].apply(list)
+    distributions = contest_probabilities.apply(_exact_hit_distribution)
+    p14_by_contest = distributions.apply(lambda dist: dist[14] if len(dist) > 14 else 0.0)
+    p13_by_contest = distributions.apply(lambda dist: dist[13] if len(dist) > 13 else 0.0)
     p14_medio = p14_by_contest.mean()
+    p13_medio = p13_by_contest.mean()
 
     return CardMetrics(
         survival=survival,
@@ -145,6 +171,8 @@ def evaluate_card(
         hits_by_contest=hits_per_contest,
         p14_by_contest=p14_by_contest,
         p14_medio=p14_medio,
+        p13_by_contest=p13_by_contest,
+        p13_medio=p13_medio,
     )
 
 
@@ -156,19 +184,21 @@ def summarize_alpha_grid(
     duplo_count: int = 5,
     rateio_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    rateio_series = None
+    rateio_14 = rateio_13 = None
     if rateio_df is not None and not rateio_df.empty:
         # Garantir que não existam rótulos duplicados de concurso antes de alinhar
         # os valores de rateio com as métricas calculadas por concurso. Caso
         # contrário, o reindex do pandas lança erro quando há duplicatas.
         rateio_unique = rateio_df.drop_duplicates(subset="Concurso")
-        rateio_series = rateio_unique.set_index("Concurso")["Rateio_14"]
+        rateio_indexed = rateio_unique.set_index("Concurso")
+        rateio_14 = rateio_indexed.get("Rateio_14")
+        rateio_13 = rateio_indexed.get("Rateio_13")
 
-    def _ev14_mean(p14_series: pd.Series) -> float:
+    def _ev_mean(prob_series: pd.Series, rateio_series: pd.Series | None) -> float:
         if rateio_series is None:
             return float("nan")
-        aligned_rateio = rateio_series.reindex(p14_series.index).fillna(0)
-        return float((p14_series * aligned_rateio).mean())
+        aligned_rateio = rateio_series.reindex(prob_series.index).fillna(0)
+        return float((prob_series * aligned_rateio).mean())
 
     records: List[dict] = []
     for alpha in alphas:
@@ -177,12 +207,15 @@ def summarize_alpha_grid(
             "alpha": alpha,
             "pct_14": metrics.survival.get(14, 0.0),
             "pct_13": metrics.survival.get(13, 0.0),
-            "pct_12": metrics.survival.get(12, 0.0),
             "duplo_coverage": metrics.duplo_coverage,
             "expected_hits": metrics.expected_hits,
             "penalty": metrics.penalty,
-            "ev14_medio": _ev14_mean(metrics.p14_by_contest),
+            "ev14_medio": _ev_mean(metrics.p14_by_contest, rateio_14),
+            "ev13_medio": _ev_mean(metrics.p13_by_contest, rateio_13),
+            "ev_total": _ev_mean(metrics.p14_by_contest, rateio_14)
+            + _ev_mean(metrics.p13_by_contest, rateio_13),
             "p14_medio": metrics.p14_medio,
+            "p13_medio": metrics.p13_medio,
         }
         records.append(record)
     return pd.DataFrame(records)

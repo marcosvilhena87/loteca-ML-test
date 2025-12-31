@@ -117,7 +117,8 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         rateio_df = load_rateio("data/raw/concurso_rateio.csv", include_extended=True)
         rateio_unique = rateio_df.drop_duplicates(subset="Concurso")
         rateio_series = rateio_unique.set_index("Concurso")
-        winsorized_rateio = rateio_series["Rateio_14_winsor"] if "Rateio_14_winsor" in rateio_series else rateio_series["Rateio_14"]
+        winsorized_rateio_14 = rateio_series.get("Rateio_14_winsor", rateio_series.get("Rateio_14"))
+        winsorized_rateio_13 = rateio_series.get("Rateio_13_winsor", rateio_series.get("Rateio_13"))
 
         logging.info("Montando pipeline de mistura (logistic regression multiclasse)...")
 
@@ -148,11 +149,17 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
 
         val_eval_base = val_df.reset_index(drop=True)
         market_cols = [f"P_market({c})" for c in CLASS_ORDER]
-        val_eval_base = val_eval_base.merge(rateio_df[["Concurso", "Rateio_14", "Acumulou_14"]], on="Concurso", how="left")
+        val_eval_base = val_eval_base.merge(
+            rateio_df[["Concurso", "Rateio_14", "Rateio_13", "Acumulou_14"]],
+            on="Concurso",
+            how="left",
+        )
 
-        def _ev14_medio(metrics) -> float:
-            aligned_rateio = winsorized_rateio.reindex(metrics.p14_by_contest.index).fillna(0)
-            return float((metrics.p14_by_contest * aligned_rateio).mean())
+        def _ev_medio(prob_series: pd.Series, rateio_series: pd.Series | None) -> float:
+            if rateio_series is None:
+                return float("nan")
+            aligned_rateio = rateio_series.reindex(prob_series.index).fillna(0)
+            return float((prob_series * aligned_rateio).mean())
 
         alpha_grid = [0.0, 0.25, 0.5, 0.75, 1.0]
 
@@ -161,19 +168,27 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             for alpha in alpha_grid:
                 model_metrics = evaluate_card(val_eval_df, prob_cols, CLASS_ORDER, alpha=alpha)
                 market_metrics = evaluate_card(val_eval_df, market_cols, CLASS_ORDER, alpha=alpha)
-                ev_model = _ev14_medio(model_metrics)
-                ev_market = _ev14_medio(market_metrics)
+                ev14_model = _ev_medio(model_metrics.p14_by_contest, winsorized_rateio_14)
+                ev14_market = _ev_medio(market_metrics.p14_by_contest, winsorized_rateio_14)
+                ev13_model = _ev_medio(model_metrics.p13_by_contest, winsorized_rateio_13)
+                ev13_market = _ev_medio(market_metrics.p13_by_contest, winsorized_rateio_13)
+                ev_total_model = ev14_model + ev13_model
+                ev_total_market = ev14_market + ev13_market
                 alpha_records.append({
                     "alpha": alpha,
-                    "ev14_modelo": ev_model,
-                    "ev14_mercado": ev_market,
-                    "ev14_diff": ev_model - ev_market,
+                    "ev14_modelo": ev14_model,
+                    "ev14_mercado": ev14_market,
+                    "ev13_modelo": ev13_model,
+                    "ev13_mercado": ev13_market,
+                    "ev_total_modelo": ev_total_model,
+                    "ev_total_mercado": ev_total_market,
+                    "ev_total_diff": ev_total_model - ev_total_market,
                     "p14_medio_modelo": model_metrics.p14_medio,
                     "p14_medio_mercado": market_metrics.p14_medio,
+                    "p13_medio_modelo": model_metrics.p13_medio,
+                    "p13_medio_mercado": market_metrics.p13_medio,
                     "pct_13_modelo": model_metrics.survival.get(13, 0.0),
-                    "pct_12_modelo": model_metrics.survival.get(12, 0.0),
                     "pct_13_mercado": market_metrics.survival.get(13, 0.0),
-                    "pct_12_mercado": market_metrics.survival.get(12, 0.0),
                     "duplo_coverage_modelo": model_metrics.duplo_coverage,
                     "expected_hits_modelo": model_metrics.expected_hits,
                     "penalty_modelo": model_metrics.penalty,
@@ -182,7 +197,9 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
                 })
 
             alpha_df = pd.DataFrame(alpha_records)
-            ordered = alpha_df.sort_values(["ev14_diff", "p14_medio_modelo", "pct_13_modelo", "pct_12_modelo"], ascending=False)
+            ordered = alpha_df.sort_values([
+                "ev_total_diff", "p14_medio_modelo", "pct_13_modelo"
+            ], ascending=False)
             best_row = ordered.iloc[0]
             return float(best_row["alpha"]), alpha_df, best_row["metrics_modelo"], best_row["metrics_mercado"]
 
@@ -199,12 +216,16 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             )
 
             best_alpha, alpha_df, best_model_metrics, best_market_metrics = _score_alphas(val_eval_df, val_prob_cols)
-            ev_model = _ev14_medio(best_model_metrics)
-            ev_market = _ev14_medio(best_market_metrics)
+            ev_model_14 = _ev_medio(best_model_metrics.p14_by_contest, winsorized_rateio_14)
+            ev_market_14 = _ev_medio(best_market_metrics.p14_by_contest, winsorized_rateio_14)
+            ev_model_13 = _ev_medio(best_model_metrics.p13_by_contest, winsorized_rateio_13)
+            ev_market_13 = _ev_medio(best_market_metrics.p13_by_contest, winsorized_rateio_13)
+            ev_model_total = ev_model_14 + ev_model_13
+            ev_market_total = ev_market_14 + ev_market_13
 
             logging.info(
-                "C=%.3g | LogLoss model=%.4f (delta=%.4f) | EV14 diff=%.2f com alpha=%.2f",
-                c_val, run["logloss_model"], delta, ev_model - ev_market, best_alpha,
+                "C=%.3g | LogLoss model=%.4f (delta=%.4f) | EV total diff=%.2f com alpha=%.2f",
+                c_val, run["logloss_model"], delta, ev_model_total - ev_market_total, best_alpha,
             )
 
             run_summary = {
@@ -214,7 +235,7 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
                 "alpha_grid": alpha_df,
                 "best_model_metrics": best_model_metrics,
                 "best_market_metrics": best_market_metrics,
-                "ev14_diff": ev_model - ev_market,
+                "ev_total_diff": ev_model_total - ev_market_total,
                 "p14_model": best_model_metrics.p14_medio,
                 "p14_market": best_market_metrics.p14_medio,
                 "pct_13_model": best_model_metrics.survival.get(13, 0.0),
@@ -227,14 +248,14 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         candidates = [r for r in all_runs if r["logloss_model"] <= logloss_market + LOGLOSS_TOL]
         if not candidates:
             logging.warning(
-                "Nenhum C respeitou o guarda-corpo de LogLoss (<= mercado + %.3f). Usando melhor EV14 disponível.",
+                "Nenhum C respeitou o guarda-corpo de LogLoss (<= mercado + %.3f). Usando melhor EV total disponível.",
                 LOGLOSS_TOL,
             )
             candidates = all_runs
 
         def _run_sort_key(run):
             return (
-                run["ev14_diff"],
+                run["ev_total_diff"],
                 run.get("p14_model", 0.0),
                 run.get("pct_13_model", 0.0),
             )
@@ -242,46 +263,49 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         best_run = sorted(candidates, key=_run_sort_key, reverse=True)[0]
         quality_best = min(all_runs, key=lambda r: (r["logloss_model"], r["brier"]))
 
-        ev_model = _ev14_medio(best_run["best_model_metrics"])
-        ev_market = _ev14_medio(best_run["best_market_metrics"])
+        ev_model = _ev_medio(best_run["best_model_metrics"].p14_by_contest, winsorized_rateio_14) \
+            + _ev_medio(best_run["best_model_metrics"].p13_by_contest, winsorized_rateio_13)
+        ev_market = _ev_medio(best_run["best_market_metrics"].p14_by_contest, winsorized_rateio_14) \
+            + _ev_medio(best_run["best_market_metrics"].p13_by_contest, winsorized_rateio_13)
         p14_model = best_run["p14_model"]
         p14_market = best_run["p14_market"]
 
         logging.info(
-            "Melhor C=%.3g maximizando EV14 (winsorizado) com guarda-corpo | EV diff=%.2f | LogLoss=%.4f (mercado=%.4f, melhor=%.4f)",
-            best_run["C"], best_run["ev14_diff"], best_run["logloss_model"], logloss_market, quality_best["logloss_model"],
+            "Melhor C=%.3g maximizando EV total (winsorizado) com guarda-corpo | EV diff=%.2f | LogLoss=%.4f (mercado=%.4f, melhor=%.4f)",
+            best_run["C"], best_run["ev_total_diff"], best_run["logloss_model"], logloss_market, quality_best["logloss_model"],
         )
         logging.info(f"Brier Score no conjunto de validação: {best_run['brier']:.4f}")
 
         model_grid = best_run["alpha_grid"]
 
         logging.info(
-            "Backtest de cartões (modelo vs mercado) maximizando EV14 winsorizado:")
+            "Backtest de cartões (modelo vs mercado) maximizando EV total winsorizado:")
         for _, row in model_grid.iterrows():
             logging.info(
-                "alpha=%.2f | EV14 diff=%.2f (modelo=%.0f vs mercado=%.0f) | p14=%.3f vs mercado=%.3f | pct>=13 modelo=%.1f (>=12=%.1f) vs mercado=%.1f (>=12=%.1f) | cobertura=%.2f | EH=%.2f | Penalidade=%.2f",
+                "alpha=%.2f | EV total diff=%.2f (modelo=%.0f vs mercado=%.0f) | EV14=%.0f vs %.0f | EV13=%.0f vs %.0f | p14=%.3f vs mercado=%.3f | pct>=13 modelo=%.1f vs mercado=%.1f | cobertura=%.2f | EH=%.2f | Penalidade=%.2f",
                 row["alpha"],
-                row["ev14_diff"],
+                row.get("ev_total_diff", float("nan")),
                 row["ev14_modelo"],
                 row["ev14_mercado"],
+                row.get("ev14_modelo", float("nan")),
+                row.get("ev14_mercado", float("nan")),
+                row.get("ev13_modelo", float("nan")),
+                row.get("ev13_mercado", float("nan")),
                 row["p14_medio_modelo"],
                 row["p14_medio_mercado"],
                 row["pct_13_modelo"],
-                row["pct_12_modelo"],
                 row["pct_13_mercado"],
-                row["pct_12_mercado"],
                 row["duplo_coverage_modelo"],
                 row["expected_hits_modelo"],
                 row["penalty_modelo"],
             )
 
         logging.info(
-            "Alpha ótimo=%.2f | Modelo: EV14=%.0f, p14=%.3f, pct>=13=%.1f, pct>=12=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV14=%.0f, p14=%.3f, pct>=13=%.1f",
+            "Alpha ótimo=%.2f | Modelo: EV total=%.0f, p14=%.3f, pct>=13=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV total=%.0f, p14=%.3f, pct>=13=%.1f",
             best_run["best_alpha"],
             ev_model,
             p14_model,
             best_run["best_model_metrics"].survival.get(13, 0.0),
-            best_run["best_model_metrics"].survival.get(12, 0.0),
             best_run["best_model_metrics"].duplo_coverage,
             best_run["best_model_metrics"].expected_hits,
             best_run["best_model_metrics"].penalty,

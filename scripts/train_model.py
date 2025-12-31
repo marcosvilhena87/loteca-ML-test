@@ -49,6 +49,9 @@ DEFAULT_FEATURE_VARIANT = "market_plus_deltas"
 DEFAULT_C_VALUES = (0.1, 0.3, 1.0, 3.0, 10.0)
 LOGLOSS_TOL = 0.01
 CLASS_ORDER = np.array(['1', 'X', '2'])
+MIN_P14_MEAN = 5e-4
+MIN_POSITIVE_EV_SHARE = 0.55
+CUSTO_CARTAO = 3.0
 
 
 def get_feature_columns(variant: str = DEFAULT_FEATURE_VARIANT) -> List[str]:
@@ -94,6 +97,12 @@ def _reorder_probas(probas: np.ndarray, source_classes: Sequence[str], target_cl
 
     index_map = [list(source_classes).index(cls) for cls in target_classes]
     return probas[:, index_map]
+
+
+def _align_rateio(index: pd.Index, rateio_series: pd.Series | None) -> pd.Series:
+    if rateio_series is None:
+        return pd.Series(0.0, index=index)
+    return rateio_series.reindex(index).fillna(0)
 
 
 def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAULT_FEATURE_VARIANT,
@@ -156,10 +165,18 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         )
 
         def _ev_medio(prob_series: pd.Series, rateio_series: pd.Series | None) -> float:
-            if rateio_series is None:
-                return float("nan")
-            aligned_rateio = rateio_series.reindex(prob_series.index).fillna(0)
+            aligned_rateio = _align_rateio(prob_series.index, rateio_series)
             return float((prob_series * aligned_rateio).mean())
+
+        def _ev_total_por_concurso(
+            p14_series: pd.Series,
+            p13_series: pd.Series,
+            rateio_14_series: pd.Series | None,
+            rateio_13_series: pd.Series | None,
+        ) -> pd.Series:
+            rateio_14_aligned = _align_rateio(p14_series.index, rateio_14_series)
+            rateio_13_aligned = _align_rateio(p13_series.index, rateio_13_series)
+            return p14_series * rateio_14_aligned + p13_series * rateio_13_aligned - CUSTO_CARTAO
 
         alpha_grid = [0.0, 0.25, 0.5, 0.75, 1.0]
 
@@ -172,8 +189,15 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
                 ev14_market = _ev_medio(market_metrics.p14_by_contest, winsorized_rateio_14)
                 ev13_model = _ev_medio(model_metrics.p13_by_contest, winsorized_rateio_13)
                 ev13_market = _ev_medio(market_metrics.p13_by_contest, winsorized_rateio_13)
-                ev_total_model = ev14_model + ev13_model
-                ev_total_market = ev14_market + ev13_market
+                ev_total_model = ev14_model + ev13_model - CUSTO_CARTAO
+                ev_total_market = ev14_market + ev13_market - CUSTO_CARTAO
+                ev_model_contest = _ev_total_por_concurso(
+                    model_metrics.p14_by_contest, model_metrics.p13_by_contest, winsorized_rateio_14, winsorized_rateio_13
+                )
+                ev_market_contest = _ev_total_por_concurso(
+                    market_metrics.p14_by_contest, market_metrics.p13_by_contest, winsorized_rateio_14, winsorized_rateio_13
+                )
+                ev_positive_share = float((ev_model_contest - ev_market_contest > 0).mean()) if not ev_model_contest.empty else 0.0
                 alpha_records.append({
                     "alpha": alpha,
                     "ev14_modelo": ev14_model,
@@ -183,6 +207,7 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
                     "ev_total_modelo": ev_total_model,
                     "ev_total_mercado": ev_total_market,
                     "ev_total_diff": ev_total_model - ev_total_market,
+                    "ev_positive_share": ev_positive_share,
                     "p14_medio_modelo": model_metrics.p14_medio,
                     "p14_medio_mercado": market_metrics.p14_medio,
                     "p13_medio_modelo": model_metrics.p13_medio,
@@ -198,7 +223,7 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
 
             alpha_df = pd.DataFrame(alpha_records)
             ordered = alpha_df.sort_values([
-                "ev_total_diff", "p14_medio_modelo", "pct_13_modelo"
+                "ev_total_diff", "p14_medio_modelo", "ev_positive_share", "pct_13_modelo"
             ], ascending=False)
             best_row = ordered.iloc[0]
             return float(best_row["alpha"]), alpha_df, best_row["metrics_modelo"], best_row["metrics_mercado"]
@@ -220,8 +245,15 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             ev_market_14 = _ev_medio(best_market_metrics.p14_by_contest, winsorized_rateio_14)
             ev_model_13 = _ev_medio(best_model_metrics.p13_by_contest, winsorized_rateio_13)
             ev_market_13 = _ev_medio(best_market_metrics.p13_by_contest, winsorized_rateio_13)
-            ev_model_total = ev_model_14 + ev_model_13
-            ev_market_total = ev_market_14 + ev_market_13
+            ev_model_total = ev_model_14 + ev_model_13 - CUSTO_CARTAO
+            ev_market_total = ev_market_14 + ev_market_13 - CUSTO_CARTAO
+            ev_model_contest = _ev_total_por_concurso(
+                best_model_metrics.p14_by_contest, best_model_metrics.p13_by_contest, winsorized_rateio_14, winsorized_rateio_13
+            )
+            ev_market_contest = _ev_total_por_concurso(
+                best_market_metrics.p14_by_contest, best_market_metrics.p13_by_contest, winsorized_rateio_14, winsorized_rateio_13
+            )
+            ev_positive_share = float((ev_model_contest - ev_market_contest > 0).mean()) if not ev_model_contest.empty else 0.0
 
             logging.info(
                 "C=%.3g | LogLoss model=%.4f (delta=%.4f) | EV total diff=%.2f com alpha=%.2f",
@@ -236,6 +268,7 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
                 "best_model_metrics": best_model_metrics,
                 "best_market_metrics": best_market_metrics,
                 "ev_total_diff": ev_model_total - ev_market_total,
+                "ev_positive_share": ev_positive_share,
                 "p14_model": best_model_metrics.p14_medio,
                 "p14_market": best_market_metrics.p14_medio,
                 "pct_13_model": best_model_metrics.survival.get(13, 0.0),
@@ -246,10 +279,14 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         assert all_runs
 
         candidates = [r for r in all_runs if r["logloss_model"] <= logloss_market + LOGLOSS_TOL]
+        candidates = [
+            r for r in candidates
+            if r.get("p14_model", 0.0) >= MIN_P14_MEAN and r.get("ev_positive_share", 0.0) >= MIN_POSITIVE_EV_SHARE
+        ]
         if not candidates:
             logging.warning(
-                "Nenhum C respeitou o guarda-corpo de LogLoss (<= mercado + %.3f). Usando melhor EV total disponível.",
-                LOGLOSS_TOL,
+                "Nenhum C respeitou os guarda-corpos (logloss e p14 mínimo/EV robusto). Usando melhor EV total disponível.",
+                
             )
             candidates = all_runs
 
@@ -257,16 +294,27 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             return (
                 run["ev_total_diff"],
                 run.get("p14_model", 0.0),
+                run.get("ev_positive_share", 0.0),
                 run.get("pct_13_model", 0.0),
             )
 
         best_run = sorted(candidates, key=_run_sort_key, reverse=True)[0]
         quality_best = min(all_runs, key=lambda r: (r["logloss_model"], r["brier"]))
 
-        ev_model = _ev_medio(best_run["best_model_metrics"].p14_by_contest, winsorized_rateio_14) \
-            + _ev_medio(best_run["best_model_metrics"].p13_by_contest, winsorized_rateio_13)
-        ev_market = _ev_medio(best_run["best_market_metrics"].p14_by_contest, winsorized_rateio_14) \
-            + _ev_medio(best_run["best_market_metrics"].p13_by_contest, winsorized_rateio_13)
+        ev_model_total = _ev_total_por_concurso(
+            best_run["best_model_metrics"].p14_by_contest,
+            best_run["best_model_metrics"].p13_by_contest,
+            winsorized_rateio_14,
+            winsorized_rateio_13,
+        )
+        ev_market_total = _ev_total_por_concurso(
+            best_run["best_market_metrics"].p14_by_contest,
+            best_run["best_market_metrics"].p13_by_contest,
+            winsorized_rateio_14,
+            winsorized_rateio_13,
+        )
+        ev_model = float(ev_model_total.mean())
+        ev_market = float(ev_market_total.mean())
         p14_model = best_run["p14_model"]
         p14_market = best_run["p14_market"]
 
@@ -282,7 +330,7 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             "Backtest de cartões (modelo vs mercado) maximizando EV total winsorizado:")
         for _, row in model_grid.iterrows():
             logging.info(
-                "alpha=%.2f | EV total diff=%.2f (modelo=%.0f vs mercado=%.0f) | EV14=%.0f vs %.0f | EV13=%.0f vs %.0f | p14=%.3f vs mercado=%.3f | pct>=13 modelo=%.1f vs mercado=%.1f | cobertura=%.2f | EH=%.2f | Penalidade=%.2f",
+                "alpha=%.2f | EV total diff=%.2f (modelo=%.0f vs mercado=%.0f) | EV14=%.0f vs %.0f | EV13=%.0f vs %.0f | p14=%.3f vs mercado=%.3f | pct13 modelo=%.1f vs mercado=%.1f | share_EV>0=%.2f | cobertura=%.2f | EH=%.2f | Penalidade=%.2f",
                 row["alpha"],
                 row.get("ev_total_diff", float("nan")),
                 row["ev14_modelo"],
@@ -295,13 +343,14 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
                 row["p14_medio_mercado"],
                 row["pct_13_modelo"],
                 row["pct_13_mercado"],
+                row.get("ev_positive_share", float("nan")),
                 row["duplo_coverage_modelo"],
                 row["expected_hits_modelo"],
                 row["penalty_modelo"],
             )
 
         logging.info(
-            "Alpha ótimo=%.2f | Modelo: EV total=%.0f, p14=%.3f, pct>=13=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV total=%.0f, p14=%.3f, pct>=13=%.1f",
+            "Alpha ótimo=%.2f | Modelo: EV total=%.0f, p14=%.3f, pct13=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV total=%.0f, p14=%.3f, pct13=%.1f",
             best_run["best_alpha"],
             ev_model,
             p14_model,

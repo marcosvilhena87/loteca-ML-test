@@ -47,6 +47,7 @@ FEATURE_VARIANTS: Dict[str, List[str]] = {
 
 DEFAULT_FEATURE_VARIANT = "market_plus_deltas"
 DEFAULT_C_VALUES = (0.1, 0.3, 1.0, 3.0, 10.0)
+LOGLOSS_TOL = 0.01
 CLASS_ORDER = np.array(['1', 'X', '2'])
 
 
@@ -95,12 +96,6 @@ def _reorder_probas(probas: np.ndarray, source_classes: Sequence[str], target_cl
     return probas[:, index_map]
 
 
-def _winsorize_rateio(rateio_series: pd.Series, lower: float = 0.0, upper: float = 0.99) -> pd.Series:
-    lower_bound = rateio_series.quantile(lower)
-    upper_bound = rateio_series.quantile(upper)
-    return rateio_series.clip(lower=lower_bound, upper=upper_bound)
-
-
 def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAULT_FEATURE_VARIANT,
           c_values: Optional[Sequence[float]] = None):
     """Train a stacked meta-model on engineered features and persist artifacts."""
@@ -119,10 +114,10 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         X_train, X_val = train_df[feature_columns], val_df[feature_columns]
         y_train, y_val = train_df['Resultado'], val_df['Resultado']
 
-        rateio_df = load_rateio("data/raw/concurso_rateio.csv")
+        rateio_df = load_rateio("data/raw/concurso_rateio.csv", include_extended=True)
         rateio_unique = rateio_df.drop_duplicates(subset="Concurso")
-        rateio_series = rateio_unique.set_index("Concurso")["Rateio_14"]
-        winsorized_rateio = _winsorize_rateio(rateio_series)
+        rateio_series = rateio_unique.set_index("Concurso")
+        winsorized_rateio = rateio_series["Rateio_14_winsor"] if "Rateio_14_winsor" in rateio_series else rateio_series["Rateio_14"]
 
         logging.info("Montando pipeline de mistura (logistic regression multiclasse)...")
 
@@ -192,6 +187,7 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             return float(best_row["alpha"]), alpha_df, best_row["metrics_modelo"], best_row["metrics_mercado"]
 
         best_run = None
+        all_runs = []
         for c_val in c_grid:
             run = _fit_and_score(c_val)
             delta = logloss_market - run["logloss_model"]
@@ -219,21 +215,41 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
                 "best_model_metrics": best_model_metrics,
                 "best_market_metrics": best_market_metrics,
                 "ev14_diff": ev_model - ev_market,
+                "p14_model": best_model_metrics.p14_medio,
+                "p14_market": best_market_metrics.p14_medio,
+                "pct_13_model": best_model_metrics.survival.get(13, 0.0),
             }
 
-            if best_run is None or run_summary["ev14_diff"] > best_run["ev14_diff"]:
-                best_run = run_summary
+            all_runs.append(run_summary)
 
-        assert best_run is not None
+        assert all_runs
+
+        candidates = [r for r in all_runs if r["logloss_model"] <= logloss_market + LOGLOSS_TOL]
+        if not candidates:
+            logging.warning(
+                "Nenhum C respeitou o guarda-corpo de LogLoss (<= mercado + %.3f). Usando melhor EV14 disponível.",
+                LOGLOSS_TOL,
+            )
+            candidates = all_runs
+
+        def _run_sort_key(run):
+            return (
+                run["ev14_diff"],
+                run.get("p14_model", 0.0),
+                run.get("pct_13_model", 0.0),
+            )
+
+        best_run = sorted(candidates, key=_run_sort_key, reverse=True)[0]
+        quality_best = min(all_runs, key=lambda r: (r["logloss_model"], r["brier"]))
 
         ev_model = _ev14_medio(best_run["best_model_metrics"])
         ev_market = _ev14_medio(best_run["best_market_metrics"])
-        p14_model = best_run["best_model_metrics"].p14_medio
-        p14_market = best_run["best_market_metrics"].p14_medio
+        p14_model = best_run["p14_model"]
+        p14_market = best_run["p14_market"]
 
         logging.info(
-            "Melhor C=%.3g maximizando EV14 (winsorizado) | EV diff=%.2f | LogLoss=%.4f (mercado=%.4f)",
-            best_run["C"], best_run["ev14_diff"], best_run["logloss_model"], logloss_market,
+            "Melhor C=%.3g maximizando EV14 (winsorizado) com guarda-corpo | EV diff=%.2f | LogLoss=%.4f (mercado=%.4f, melhor=%.4f)",
+            best_run["C"], best_run["ev14_diff"], best_run["logloss_model"], logloss_market, quality_best["logloss_model"],
         )
         logging.info(f"Brier Score no conjunto de validação: {best_run['brier']:.4f}")
 

@@ -84,13 +84,24 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
         p1 = sorted_probs[:, 0]
         p2 = sorted_probs[:, 1]
 
-        future_df['duplo_gain'] = np.log((p1 + (1 + duo_alpha) * p2) / p1)
         future_df['gap_final'] = p1 - p2
         future_df['entropia_final'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
         future_df['Entropia'] = future_df['entropia_final']
 
+        marginal_records = []
+        for contest, contest_indices in future_df.groupby("Concurso").groups.items():
+            base_p14 = float(np.prod(p1[contest_indices]))
+            if base_p14 == 0:
+                base_p14 = epsilon
+            for idx in contest_indices:
+                marginal_gain = base_p14 * ((p1[idx] + (1 + duo_alpha) * p2[idx]) / p1[idx] - 1)
+                marginal_records.append((idx, marginal_gain, contest))
+
+        marginal_df = pd.DataFrame(marginal_records, columns=["idx", "duplo_gain", "Concurso"])
+        future_df['duplo_gain'] = marginal_df.set_index('idx')['duplo_gain']
+
         jogos_duplos_idxs = []
-        for _, contest_indices in future_df.groupby("Concurso").groups.items():
+        for contest, contest_indices in future_df.groupby("Concurso").groups.items():
             contest_df = future_df.loc[contest_indices]
             top_duplos = contest_df.nlargest(5, 'duplo_gain').index
             jogos_duplos_idxs.extend(top_duplos)

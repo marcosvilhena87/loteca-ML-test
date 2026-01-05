@@ -41,6 +41,39 @@ def compute_hit_probabilities(probabilities: Sequence[float]) -> dict[int, float
     }
 
 
+def _ev_from_probabilities(
+    p14_series: pd.Series,
+    p13_series: pd.Series,
+    rateio_14_samples: np.ndarray,
+    rateio_13_samples: np.ndarray,
+    w14: float,
+    w13: float,
+    card_cost: float,
+) -> tuple[float, float, float]:
+    """Monte Carlo EV for a set of contests.
+
+    Sampling avoids overfitting to a single payout. For each bootstrap sample we
+    compute the mean EV across contests, returning the overall mean and the
+    p10/p90 envelope to express downside and upside risk.
+    """
+
+    if len(rateio_14_samples) != len(rateio_13_samples):
+        raise ValueError("As amostras de rateio 14 e 13 devem ter o mesmo tamanho.")
+
+    p14 = p14_series.to_numpy()
+    p13 = p13_series.to_numpy()
+    if p14.size == 0:
+        return 0.0, 0.0, 0.0
+
+    ev_samples = []
+    for r14, r13 in zip(rateio_14_samples, rateio_13_samples):
+        ev_per_contest = w14 * p14 * r14 + w13 * p13 * r13 - card_cost
+        ev_samples.append(ev_per_contest.mean())
+
+    ev_samples = np.array(ev_samples)
+    return float(ev_samples.mean()), float(np.percentile(ev_samples, 10)), float(np.percentile(ev_samples, 90))
+
+
 def _select_duplo_indices(probabilities: np.ndarray, alpha: float, duplo_count: int) -> np.ndarray:
     epsilon = 1e-12
     adjusted = probabilities + epsilon
@@ -183,6 +216,11 @@ def summarize_alpha_grid(
     alphas: Sequence[float],
     duplo_count: int = 5,
     rateio_df: pd.DataFrame | None = None,
+    rateio_14_samples: np.ndarray | None = None,
+    rateio_13_samples: np.ndarray | None = None,
+    w14: float = 1.0,
+    w13: float = 1.0,
+    card_cost: float = 0.0,
 ) -> pd.DataFrame:
     rateio_14 = rateio_13 = None
     if rateio_df is not None and not rateio_df.empty:
@@ -203,6 +241,19 @@ def summarize_alpha_grid(
     records: List[dict] = []
     for alpha in alphas:
         metrics = evaluate_card(df, prob_columns, class_order, alpha, duplo_count)
+        ev14_mean = _ev_mean(metrics.p14_by_contest, rateio_14)
+        ev13_mean = _ev_mean(metrics.p13_by_contest, rateio_13)
+        mc_mean, mc_p10, mc_p90 = (float("nan"), float("nan"), float("nan"))
+        if rateio_14_samples is not None and rateio_13_samples is not None:
+            mc_mean, mc_p10, mc_p90 = _ev_from_probabilities(
+                metrics.p14_by_contest,
+                metrics.p13_by_contest,
+                rateio_14_samples,
+                rateio_13_samples,
+                w14,
+                w13,
+                card_cost,
+            )
         record = {
             "alpha": alpha,
             "pct_14": metrics.survival.get(14, 0.0),
@@ -210,10 +261,12 @@ def summarize_alpha_grid(
             "duplo_coverage": metrics.duplo_coverage,
             "expected_hits": metrics.expected_hits,
             "penalty": metrics.penalty,
-            "ev14_medio": _ev_mean(metrics.p14_by_contest, rateio_14),
-            "ev13_medio": _ev_mean(metrics.p13_by_contest, rateio_13),
-            "ev_total": _ev_mean(metrics.p14_by_contest, rateio_14)
-            + _ev_mean(metrics.p13_by_contest, rateio_13),
+            "ev14_medio": ev14_mean,
+            "ev13_medio": ev13_mean,
+            "ev_total": w14 * ev14_mean + w13 * ev13_mean - card_cost,
+            "ev_total_mc": mc_mean,
+            "ev_total_p10": mc_p10,
+            "ev_total_p90": mc_p90,
             "p14_medio": metrics.p14_medio,
             "p13_medio": metrics.p13_medio,
         }

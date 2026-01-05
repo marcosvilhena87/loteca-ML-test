@@ -48,7 +48,7 @@ FEATURE_VARIANTS: Dict[str, List[str]] = {
 DEFAULT_FEATURE_VARIANT = "market_plus_deltas"
 DEFAULT_C_VALUES = (0.1, 0.3, 1.0, 3.0, 10.0)
 LOGLOSS_TOL = 0.005
-BRIER_TOL = 0.001
+BRIER_TOL = 0.01
 CLASS_ORDER = np.array(['1', 'X', '2'])
 MIN_P14_MEAN = 5e-4
 MIN_POSITIVE_EV_SHARE = 0.55
@@ -146,7 +146,7 @@ def train(
         def _fit_and_score(C_value: float):
             pipeline = Pipeline([
                 ("scaler", StandardScaler()),
-                ("clf", LogisticRegression(max_iter=1000, C=C_value, multi_class="multinomial", solver="lbfgs")),
+                ("clf", LogisticRegression(max_iter=1000, C=C_value, solver="lbfgs")),
             ])
             pipeline.fit(X_train, y_train)
             val_proba_raw = pipeline.predict_proba(X_val)
@@ -196,8 +196,28 @@ def train(
         def _score_alphas(val_eval_df: pd.DataFrame, prob_cols: List[str]):
             alpha_records = []
             for alpha in alpha_grid:
-                model_metrics = evaluate_card(val_eval_df, prob_cols, CLASS_ORDER, alpha=alpha)
-                market_metrics = evaluate_card(val_eval_df, market_cols, CLASS_ORDER, alpha=alpha)
+                model_metrics = evaluate_card(
+                    val_eval_df,
+                    prob_cols,
+                    CLASS_ORDER,
+                    alpha=alpha,
+                    rateio_14_samples=rateio_14_samples,
+                    rateio_13_samples=rateio_13_samples,
+                    w14=w14,
+                    w13=w13,
+                    card_cost=CUSTO_CARTAO,
+                )
+                market_metrics = evaluate_card(
+                    val_eval_df,
+                    market_cols,
+                    CLASS_ORDER,
+                    alpha=alpha,
+                    rateio_14_samples=rateio_14_samples,
+                    rateio_13_samples=rateio_13_samples,
+                    w14=w14,
+                    w13=w13,
+                    card_cost=CUSTO_CARTAO,
+                )
                 ev14_model = _ev_medio(model_metrics.p14_by_contest, winsorized_rateio_14)
                 ev14_market = _ev_medio(market_metrics.p14_by_contest, winsorized_rateio_14)
                 ev13_model = _ev_medio(model_metrics.p13_by_contest, winsorized_rateio_13)

@@ -19,6 +19,7 @@ class CardMetrics:
     p14_medio: float
     p13_by_contest: pd.Series
     p13_medio: float
+    duplo_indices: Mapping[int, List[int]]
 
 
 def _exact_hit_distribution(probabilities: Sequence[float]) -> List[float]:
@@ -98,7 +99,7 @@ def _build_card_frame(
     chosen_top = top_two_indices[:, 0]
 
     records = []
-    df_reset = df.reset_index(drop=True)
+    df_reset = df.reset_index()
     for _, contest_indices in df_reset.groupby("Concurso").indices.items():
         contest_indices = list(contest_indices)
         contest_probs = probabilities[contest_indices]
@@ -116,6 +117,7 @@ def _build_card_frame(
                 duplo_choices = []
             records.append(
                 {
+                    "Original_index": df_reset.iloc[idx]["index"],
                     "Concurso": df_reset.iloc[idx]["Concurso"],
                     "Resultado": df_reset.iloc[idx]["Resultado"],
                     "Seco": seco_choice,
@@ -174,7 +176,7 @@ def evaluate_card(
     survival_thresholds: Sequence[int] = (14, 13),
 ) -> CardMetrics:
     probabilities = df[list(prob_columns)].to_numpy(dtype=float)
-    card_df = _build_card_frame(df.reset_index(drop=True), probabilities, class_order, alpha, duplo_count)
+    card_df = _build_card_frame(df, probabilities, class_order, alpha, duplo_count)
 
     class_to_idx = {c: i for i, c in enumerate(class_order)}
     card_df = _contest_hits(card_df, class_to_idx)
@@ -196,6 +198,13 @@ def evaluate_card(
     p14_medio = p14_by_contest.mean()
     p13_medio = p13_by_contest.mean()
 
+    duplo_indices = (
+        card_df.loc[card_df["Duplo"]]
+        .groupby("Concurso")["Original_index"]
+        .apply(list)
+        .to_dict()
+    )
+
     return CardMetrics(
         survival=survival,
         duplo_coverage=coverage,
@@ -206,6 +215,7 @@ def evaluate_card(
         p14_medio=p14_medio,
         p13_by_contest=p13_by_contest,
         p13_medio=p13_medio,
+        duplo_indices=duplo_indices,
     )
 
 

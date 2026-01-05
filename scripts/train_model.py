@@ -9,8 +9,8 @@ from sklearn.metrics import log_loss
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from .loteca_metrics import evaluate_card
-from .rateio_utils import load_rateio
+from .loteca_metrics import _ev_from_probabilities, evaluate_card
+from .rateio_utils import load_rateio, sample_rateio_distribution
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -52,6 +52,9 @@ CLASS_ORDER = np.array(['1', 'X', '2'])
 MIN_P14_MEAN = 5e-4
 MIN_POSITIVE_EV_SHARE = 0.55
 CUSTO_CARTAO = 3.0
+DEFAULT_W14 = 1.0
+DEFAULT_W13 = 1.0
+MC_SAMPLES = 2000
 
 
 def get_feature_columns(variant: str = DEFAULT_FEATURE_VARIANT) -> List[str]:
@@ -105,8 +108,15 @@ def _align_rateio(index: pd.Index, rateio_series: pd.Series | None) -> pd.Series
     return rateio_series.reindex(index).fillna(0)
 
 
-def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAULT_FEATURE_VARIANT,
-          c_values: Optional[Sequence[float]] = None):
+def train(
+    input_file,
+    model_file,
+    scaler_file=None,
+    feature_variant: str = DEFAULT_FEATURE_VARIANT,
+    c_values: Optional[Sequence[float]] = None,
+    w14: float = DEFAULT_W14,
+    w13: float = DEFAULT_W13,
+):
     """Train a stacked meta-model on engineered features and persist artifacts."""
     try:
         logging.info("Carregando os dados de entrada...")
@@ -128,6 +138,7 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         rateio_series = rateio_unique.set_index("Concurso")
         winsorized_rateio_14 = rateio_series.get("Rateio_14_winsor", rateio_series.get("Rateio_14"))
         winsorized_rateio_13 = rateio_series.get("Rateio_13_winsor", rateio_series.get("Rateio_13"))
+        rateio_14_samples, rateio_13_samples = sample_rateio_distribution(rateio_df, n_samples=MC_SAMPLES)
 
         logging.info("Montando pipeline de mistura (logistic regression multiclasse)...")
 
@@ -176,7 +187,7 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         ) -> pd.Series:
             rateio_14_aligned = _align_rateio(p14_series.index, rateio_14_series)
             rateio_13_aligned = _align_rateio(p13_series.index, rateio_13_series)
-            return p14_series * rateio_14_aligned + p13_series * rateio_13_aligned - CUSTO_CARTAO
+            return w14 * p14_series * rateio_14_aligned + w13 * p13_series * rateio_13_aligned - CUSTO_CARTAO
 
         alpha_grid = [0.0, 0.25, 0.5, 0.75, 1.0]
 
@@ -189,8 +200,8 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
                 ev14_market = _ev_medio(market_metrics.p14_by_contest, winsorized_rateio_14)
                 ev13_model = _ev_medio(model_metrics.p13_by_contest, winsorized_rateio_13)
                 ev13_market = _ev_medio(market_metrics.p13_by_contest, winsorized_rateio_13)
-                ev_total_model = ev14_model + ev13_model - CUSTO_CARTAO
-                ev_total_market = ev14_market + ev13_market - CUSTO_CARTAO
+                ev_total_model = w14 * ev14_model + w13 * ev13_model - CUSTO_CARTAO
+                ev_total_market = w14 * ev14_market + w13 * ev13_market - CUSTO_CARTAO
                 ev_model_contest = _ev_total_por_concurso(
                     model_metrics.p14_by_contest, model_metrics.p13_by_contest, winsorized_rateio_14, winsorized_rateio_13
                 )
@@ -198,6 +209,15 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
                     market_metrics.p14_by_contest, market_metrics.p13_by_contest, winsorized_rateio_14, winsorized_rateio_13
                 )
                 ev_positive_share = float((ev_model_contest - ev_market_contest > 0).mean()) if not ev_model_contest.empty else 0.0
+                ev_mc_mean, ev_mc_p10, ev_mc_p90 = _ev_from_probabilities(
+                    model_metrics.p14_by_contest,
+                    model_metrics.p13_by_contest,
+                    rateio_14_samples,
+                    rateio_13_samples,
+                    w14,
+                    w13,
+                    CUSTO_CARTAO,
+                )
                 alpha_records.append({
                     "alpha": alpha,
                     "ev14_modelo": ev14_model,
@@ -207,6 +227,9 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
                     "ev_total_modelo": ev_total_model,
                     "ev_total_mercado": ev_total_market,
                     "ev_total_diff": ev_total_model - ev_total_market,
+                    "ev_total_mc": ev_mc_mean,
+                    "ev_total_p10": ev_mc_p10,
+                    "ev_total_p90": ev_mc_p90,
                     "ev_positive_share": ev_positive_share,
                     "p14_medio_modelo": model_metrics.p14_medio,
                     "p14_medio_mercado": market_metrics.p14_medio,
@@ -223,7 +246,7 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
 
             alpha_df = pd.DataFrame(alpha_records)
             ordered = alpha_df.sort_values([
-                "ev_total_diff", "p14_medio_modelo", "ev_positive_share", "pct_13_modelo"
+                "ev_total_diff", "ev_total_mc", "p14_medio_modelo", "ev_positive_share", "pct_13_modelo"
             ], ascending=False)
             best_row = ordered.iloc[0]
             return float(best_row["alpha"]), alpha_df, best_row["metrics_modelo"], best_row["metrics_mercado"]
@@ -245,8 +268,8 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             ev_market_14 = _ev_medio(best_market_metrics.p14_by_contest, winsorized_rateio_14)
             ev_model_13 = _ev_medio(best_model_metrics.p13_by_contest, winsorized_rateio_13)
             ev_market_13 = _ev_medio(best_market_metrics.p13_by_contest, winsorized_rateio_13)
-            ev_model_total = ev_model_14 + ev_model_13 - CUSTO_CARTAO
-            ev_market_total = ev_market_14 + ev_market_13 - CUSTO_CARTAO
+            ev_model_total = w14 * ev_model_14 + w13 * ev_model_13 - CUSTO_CARTAO
+            ev_market_total = w14 * ev_market_14 + w13 * ev_market_13 - CUSTO_CARTAO
             ev_model_contest = _ev_total_por_concurso(
                 best_model_metrics.p14_by_contest, best_model_metrics.p13_by_contest, winsorized_rateio_14, winsorized_rateio_13
             )
@@ -315,6 +338,24 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
         )
         ev_model = float(ev_model_total.mean())
         ev_market = float(ev_market_total.mean())
+        ev_model_mc, ev_model_p10, ev_model_p90 = _ev_from_probabilities(
+            best_run["best_model_metrics"].p14_by_contest,
+            best_run["best_model_metrics"].p13_by_contest,
+            rateio_14_samples,
+            rateio_13_samples,
+            w14,
+            w13,
+            CUSTO_CARTAO,
+        )
+        ev_market_mc, ev_market_p10, ev_market_p90 = _ev_from_probabilities(
+            best_run["best_market_metrics"].p14_by_contest,
+            best_run["best_market_metrics"].p13_by_contest,
+            rateio_14_samples,
+            rateio_13_samples,
+            w14,
+            w13,
+            CUSTO_CARTAO,
+        )
         p14_model = best_run["p14_model"]
         p14_market = best_run["p14_market"]
 
@@ -330,11 +371,14 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             "Backtest de cartões (modelo vs mercado) maximizando EV total winsorizado:")
         for _, row in model_grid.iterrows():
             logging.info(
-                "alpha=%.2f | EV total diff=%.2f (modelo=%.0f vs mercado=%.0f) | EV14=%.0f vs %.0f | EV13=%.0f vs %.0f | p14=%.3f vs mercado=%.3f | pct13 modelo=%.1f vs mercado=%.1f | share_EV>0=%.2f | cobertura=%.2f | EH=%.2f | Penalidade=%.2f",
+                "alpha=%.2f | EV diff=%.2f (modelo=%.0f vs mercado=%.0f) | EV_MC=%.0f p10=%.0f p90=%.0f | EV14=%.0f vs %.0f | EV13=%.0f vs %.0f | p14=%.3f vs mercado=%.3f | pct13 modelo=%.1f vs mercado=%.1f | share_EV>0=%.2f | cobertura=%.2f | EH=%.2f | Penalidade=%.2f",
                 row["alpha"],
                 row.get("ev_total_diff", float("nan")),
                 row["ev14_modelo"],
                 row["ev14_mercado"],
+                row.get("ev_total_mc", float("nan")),
+                row.get("ev_total_p10", float("nan")),
+                row.get("ev_total_p90", float("nan")),
                 row.get("ev14_modelo", float("nan")),
                 row.get("ev14_mercado", float("nan")),
                 row.get("ev13_modelo", float("nan")),
@@ -350,15 +394,21 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             )
 
         logging.info(
-            "Alpha ótimo=%.2f | Modelo: EV total=%.0f, p14=%.3f, pct13=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV total=%.0f, p14=%.3f, pct13=%.1f",
+            "Alpha ótimo=%.2f | Modelo: EV total=%.0f (MC=%.0f p10=%.0f p90=%.0f), p14=%.3f, pct13=%.1f, cobertura=%.2f, EH=%.2f, Penalidade=%.2f | Mercado EV total=%.0f (MC=%.0f p10=%.0f p90=%.0f), p14=%.3f, pct13=%.1f",
             best_run["best_alpha"],
             ev_model,
+            ev_model_mc,
+            ev_model_p10,
+            ev_model_p90,
             p14_model,
             best_run["best_model_metrics"].survival.get(13, 0.0),
             best_run["best_model_metrics"].duplo_coverage,
             best_run["best_model_metrics"].expected_hits,
             best_run["best_model_metrics"].penalty,
             ev_market,
+            ev_market_mc,
+            ev_market_p10,
+            ev_market_p90,
             p14_market,
             best_run["best_market_metrics"].survival.get(13, 0.0),
         )
@@ -368,6 +418,8 @@ def train(input_file, model_file, scaler_file=None, feature_variant: str = DEFAU
             "feature_variant": feature_variant,
             "feature_columns": feature_columns,
             "best_duplo_alpha": best_run["best_alpha"],
+            "w14": w14,
+            "w13": w13,
         }
         dump(artifact, model_file)
 

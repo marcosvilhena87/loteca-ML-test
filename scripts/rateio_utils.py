@@ -1,4 +1,4 @@
-"""Utilities for parsing Loteca rateio (prize) files."""
+"""Utilities for parsing Loteca rateio (prize) files and sampling distributions."""
 import numpy as np
 import pandas as pd
 
@@ -7,6 +7,13 @@ def _winsorize(series: pd.Series, lower: float = 0.0, upper: float = 0.99) -> pd
     lower_bound = series.quantile(lower)
     upper_bound = series.quantile(upper)
     return series.clip(lower=lower_bound, upper=upper_bound)
+
+
+def _sample_series(series: pd.Series, n_samples: int) -> np.ndarray:
+    cleaned = series.dropna()
+    if cleaned.empty:
+        return np.zeros(n_samples)
+    return np.random.choice(cleaned, size=n_samples, replace=True)
 
 
 def load_rateio(path, include_extended: bool = False) -> pd.DataFrame:
@@ -47,3 +54,17 @@ def load_rateio(path, include_extended: bool = False) -> pd.DataFrame:
         ordered_columns = base_columns
 
     return df[ordered_columns]
+
+
+def sample_rateio_distribution(rateio_df: pd.DataFrame, n_samples: int = 2000) -> tuple[np.ndarray, np.ndarray]:
+    """Return bootstrap samples for rateios 14/13 using winsorized history.
+
+    The Monte Carlo sampling guards against over-optimism from a single extreme
+    rateio by resampling plausible historical payouts. If winsorized columns are
+    missing, the raw values are used as fallback.
+    """
+
+    rateio_14 = rateio_df.get('Rateio_14_winsor', rateio_df.get('Rateio_14', pd.Series(dtype=float)))
+    rateio_13 = rateio_df.get('Rateio_13_winsor', rateio_df.get('Rateio_13', pd.Series(dtype=float)))
+
+    return _sample_series(rateio_14, n_samples), _sample_series(rateio_13, n_samples)

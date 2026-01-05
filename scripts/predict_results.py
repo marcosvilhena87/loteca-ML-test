@@ -6,9 +6,18 @@ from joblib import load
 
 from .features import (RatingEngine, compute_expert_differences,
                        compute_implied_probabilities, enrich_features)
-from .train_model import (CLASS_ORDER, DEFAULT_FEATURE_VARIANT, get_feature_columns,
-                          _reorder_probas)
-from .loteca_metrics import compute_hit_probabilities
+from .train_model import (
+    CLASS_ORDER,
+    CUSTO_CARTAO,
+    DEFAULT_FEATURE_VARIANT,
+    DEFAULT_W13,
+    DEFAULT_W14,
+    MC_SAMPLES,
+    get_feature_columns,
+    _reorder_probas,
+)
+from .loteca_metrics import _ev_from_probabilities, compute_hit_probabilities
+from .rateio_utils import load_rateio, sample_rateio_distribution
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -25,8 +34,18 @@ def _load_history(history_file: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def predict(input_file, model_file, scaler_file=None, output_file=None, history_file: str = "data/processed/loteca_treinamento.csv",
-            duo_alpha: float = DEFAULT_DUO_ALPHA, feature_variant: str = DEFAULT_FEATURE_VARIANT):
+def predict(
+    input_file,
+    model_file,
+    scaler_file=None,
+    output_file=None,
+    history_file: str = "data/processed/loteca_treinamento.csv",
+    duo_alpha: float = DEFAULT_DUO_ALPHA,
+    feature_variant: str = DEFAULT_FEATURE_VARIANT,
+    w14: float = DEFAULT_W14,
+    w13: float = DEFAULT_W13,
+    rateio_file: str = "data/raw/concurso_rateio.csv",
+):
     """Generate predictions and rich diagnostics for future games."""
     try:
         logging.info("Carregando dados dos jogos futuros...")
@@ -40,6 +59,10 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
         future_df = compute_implied_probabilities(future_df)
 
         history_df = _load_history(history_file)
+        rateio_df = load_rateio(rateio_file, include_extended=True)
+        rateio_14_samples, rateio_13_samples = sample_rateio_distribution(rateio_df, n_samples=MC_SAMPLES)
+        rateio_14_mean = rateio_df.get("Rateio_14_winsor", rateio_df.get("Rateio_14", pd.Series(dtype=float))).mean()
+        rateio_13_mean = rateio_df.get("Rateio_13_winsor", rateio_df.get("Rateio_13", pd.Series(dtype=float))).mean()
         engine = RatingEngine()
         if not history_df.empty and {'Resultado', 'Mandante', 'Visitante'}.issubset(history_df.columns):
             logging.info("Atualizando estados de Elo/Poisson com histórico...")
@@ -61,6 +84,8 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
             tuned_alpha = model_artifact.get("best_duplo_alpha")
             if tuned_alpha is not None and duo_alpha == DEFAULT_DUO_ALPHA:
                 duo_alpha = tuned_alpha
+            w14 = model_artifact.get("w14", w14)
+            w13 = model_artifact.get("w13", w13)
         else:
             model = model_artifact
             feature_columns = get_feature_columns(feature_variant)
@@ -94,14 +119,14 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
             contest_indices = list(contest_indices)
             base_probs = [float(p1[idx]) for idx in contest_indices]
             base_hits = compute_hit_probabilities(base_probs)
-            base_ev_total = base_hits[14] + base_hits[13]
+            base_ev_total = w14 * base_hits[14] * rateio_14_mean + w13 * base_hits[13] * rateio_13_mean - CUSTO_CARTAO
 
             for local_pos, idx in enumerate(contest_indices):
                 duplo_prob = min(1.0, float(p1[idx] + p2[idx]))
                 adjusted_probs = base_probs.copy()
                 adjusted_probs[local_pos] = duplo_prob
                 duplo_hits = compute_hit_probabilities(adjusted_probs)
-                duplo_ev_total = duplo_hits[14] + duplo_hits[13]
+                duplo_ev_total = w14 * duplo_hits[14] * rateio_14_mean + w13 * duplo_hits[13] * rateio_13_mean - CUSTO_CARTAO
                 marginal_gain = duplo_ev_total - base_ev_total
                 marginal_records.append((idx, marginal_gain, contest))
 
@@ -111,7 +136,10 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
         jogos_duplos_idxs = []
         for contest, contest_indices in future_df.groupby("Concurso").groups.items():
             contest_df = future_df.loc[contest_indices]
-            top_duplos = contest_df.nlargest(5, 'duplo_gain').index
+            contest_df = contest_df.sort_values(
+                by=["duplo_gain", "entropia_final"], ascending=[False, True]
+            )
+            top_duplos = contest_df.head(5).index
             jogos_duplos_idxs.extend(top_duplos)
 
         logging.info(f"Índices dos jogos mais incertos para duplos: {sorted(jogos_duplos_idxs)}")
@@ -129,6 +157,37 @@ def predict(input_file, model_file, scaler_file=None, output_file=None, history_
             contest_idxs = [idx for idx in jogos_duplos_idxs if idx in indices]
             logging.info(f"Concurso {contest}: {contest_idxs}")
             logging.info(future_df.loc[contest_idxs, ['Aposta'] + present_cols])
+
+        contest_reports = []
+        for contest, indices in future_df.groupby("Concurso").groups.items():
+            base_probs = [float(p1[idx]) for idx in indices]
+            hits = compute_hit_probabilities(base_probs)
+            ev_samples = (
+                w14 * np.array(rateio_14_samples) * hits[14]
+                + w13 * np.array(rateio_13_samples) * hits[13]
+                - CUSTO_CARTAO
+            )
+            duplos_contest = future_df.loc[future_df.index.isin(jogos_duplos_idxs)]
+            duplos_contest = duplos_contest[duplos_contest["Concurso"] == contest]
+            contest_reports.append(
+                {
+                    "Concurso": contest,
+                    "EV_total_mean": float(ev_samples.mean()),
+                    "EV_total_p10": float(np.percentile(ev_samples, 10)),
+                    "EV_total_p90": float(np.percentile(ev_samples, 90)),
+                    "EV14": float(hits[14] * rateio_14_mean * w14),
+                    "EV13": float(hits[13] * rateio_13_mean * w13),
+                    "P14": hits[14],
+                    "P13": hits[13],
+                    "Share_EV_pos": float((ev_samples > 0).mean()),
+                    "Duplos": ", ".join(future_df.loc[idx, 'Aposta'] for idx in duplos_contest.index),
+                    "Ganho_marginal_medio": float(future_df.loc[duplos_contest.index, 'duplo_gain'].mean()) if not duplos_contest.empty else 0.0,
+                }
+            )
+
+        report_df = pd.DataFrame(contest_reports)
+        logging.info("Resumo financeiro por concurso (EV total como objetivo):")
+        logging.info(report_df)
 
         if output_file:
             logging.info(f"Salvando predições no arquivo {output_file}...")

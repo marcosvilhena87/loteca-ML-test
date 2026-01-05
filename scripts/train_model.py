@@ -47,7 +47,8 @@ FEATURE_VARIANTS: Dict[str, List[str]] = {
 
 DEFAULT_FEATURE_VARIANT = "market_plus_deltas"
 DEFAULT_C_VALUES = (0.1, 0.3, 1.0, 3.0, 10.0)
-LOGLOSS_TOL = 0.01
+LOGLOSS_TOL = 0.005
+BRIER_TOL = 0.001
 CLASS_ORDER = np.array(['1', 'X', '2'])
 MIN_P14_MEAN = 5e-4
 MIN_POSITIVE_EV_SHARE = 0.55
@@ -145,7 +146,7 @@ def train(
         def _fit_and_score(C_value: float):
             pipeline = Pipeline([
                 ("scaler", StandardScaler()),
-                ("clf", LogisticRegression(max_iter=500, C=C_value)),
+                ("clf", LogisticRegression(max_iter=1000, C=C_value, multi_class="multinomial", solver="lbfgs")),
             ])
             pipeline.fit(X_train, y_train)
             val_proba_raw = pipeline.predict_proba(X_val)
@@ -166,6 +167,7 @@ def train(
         market_cols = [f"P_market({c})" for c in CLASS_ORDER]
         val_market = val_df[market_cols].values
         logloss_market = log_loss(y_val, val_market, labels=CLASS_ORDER)
+        brier_market = _multiclass_brier(y_val, val_market, CLASS_ORDER)
 
         val_eval_base = val_df.reset_index(drop=True)
         market_cols = [f"P_market({c})" for c in CLASS_ORDER]
@@ -189,7 +191,7 @@ def train(
             rateio_13_aligned = _align_rateio(p13_series.index, rateio_13_series)
             return w14 * p14_series * rateio_14_aligned + w13 * p13_series * rateio_13_aligned - CUSTO_CARTAO
 
-        alpha_grid = [0.0, 0.25, 0.5, 0.75, 1.0]
+        alpha_grid = [0.0, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0]
 
         def _score_alphas(val_eval_df: pd.DataFrame, prob_cols: List[str]):
             alpha_records = []
@@ -220,6 +222,7 @@ def train(
                 )
                 alpha_records.append({
                     "alpha": alpha,
+                    "duplo_indices": dict(model_metrics.duplo_indices),
                     "ev14_modelo": ev14_model,
                     "ev14_mercado": ev14_market,
                     "ev13_modelo": ev13_model,
@@ -282,6 +285,7 @@ def train(
                 "C=%.3g | LogLoss model=%.4f (delta=%.4f) | EV total diff=%.2f com alpha=%.2f",
                 c_val, run["logloss_model"], delta, ev_model_total - ev_market_total, best_alpha,
             )
+            logging.info("Duplos por alpha na validação: %s", best_model_metrics.duplo_indices)
 
             run_summary = {
                 "C": c_val,
@@ -301,7 +305,10 @@ def train(
 
         assert all_runs
 
-        candidates = [r for r in all_runs if r["logloss_model"] <= logloss_market + LOGLOSS_TOL]
+        candidates = [
+            r for r in all_runs
+            if r["logloss_model"] <= logloss_market + LOGLOSS_TOL and r["brier"] <= brier_market + BRIER_TOL
+        ]
         candidates = [
             r for r in candidates
             if r.get("p14_model", 0.0) >= MIN_P14_MEAN and r.get("ev_positive_share", 0.0) >= MIN_POSITIVE_EV_SHARE

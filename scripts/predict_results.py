@@ -16,7 +16,11 @@ from .train_model import (
     get_feature_columns,
     _reorder_probas,
 )
-from .loteca_metrics import _ev_from_probabilities, compute_hit_probabilities
+from .loteca_metrics import (
+    _ev_from_probabilities,
+    _select_duplo_indices,
+    compute_hit_probabilities,
+)
 from .rateio_utils import load_rateio, sample_rateio_distribution
 
 logging.basicConfig(level=logging.INFO,
@@ -115,32 +119,46 @@ def predict(
         future_df['Entropia'] = future_df['entropia_final']
 
         marginal_records = []
+        jogos_duplos_idxs = []
         for contest, contest_indices in future_df.groupby("Concurso").groups.items():
             contest_indices = list(contest_indices)
             base_probs = [float(p1[idx]) for idx in contest_indices]
             base_hits = compute_hit_probabilities(base_probs)
-            base_ev_total = w14 * base_hits[14] * rateio_14_mean + w13 * base_hits[13] * rateio_13_mean - CUSTO_CARTAO
+            base_ev_mean, _, _ = _ev_from_probabilities(
+                pd.Series([base_hits[14]], index=[contest]),
+                pd.Series([base_hits[13]], index=[contest]),
+                rateio_14_samples,
+                rateio_13_samples,
+                w14,
+                w13,
+                CUSTO_CARTAO,
+            )
 
             for local_pos, idx in enumerate(contest_indices):
                 duplo_prob = min(1.0, float(p1[idx] + p2[idx]))
                 adjusted_probs = base_probs.copy()
                 adjusted_probs[local_pos] = duplo_prob
                 duplo_hits = compute_hit_probabilities(adjusted_probs)
-                duplo_ev_total = w14 * duplo_hits[14] * rateio_14_mean + w13 * duplo_hits[13] * rateio_13_mean - CUSTO_CARTAO
-                marginal_gain = duplo_ev_total - base_ev_total
+                duplo_ev_mean, _, _ = _ev_from_probabilities(
+                    pd.Series([duplo_hits[14]], index=[contest]),
+                    pd.Series([duplo_hits[13]], index=[contest]),
+                    rateio_14_samples,
+                    rateio_13_samples,
+                    w14,
+                    w13,
+                    CUSTO_CARTAO,
+                )
+                marginal_gain = duplo_ev_mean - base_ev_mean
                 marginal_records.append((idx, marginal_gain, contest))
+
+            contest_probs = probabilities[contest_indices]
+            duplo_positions = _select_duplo_indices(
+                contest_probs, alpha=duo_alpha, duplo_count=5
+            )
+            jogos_duplos_idxs.extend(contest_indices[pos] for pos in duplo_positions)
 
         marginal_df = pd.DataFrame(marginal_records, columns=["idx", "duplo_gain", "Concurso"])
         future_df['duplo_gain'] = marginal_df.set_index('idx')['duplo_gain']
-
-        jogos_duplos_idxs = []
-        for contest, contest_indices in future_df.groupby("Concurso").groups.items():
-            contest_df = future_df.loc[contest_indices]
-            contest_df = contest_df.sort_values(
-                by=["duplo_gain", "entropia_final"], ascending=[False, True]
-            )
-            top_duplos = contest_df.head(5).index
-            jogos_duplos_idxs.extend(top_duplos)
 
         logging.info(f"Índices dos jogos mais incertos para duplos: {sorted(jogos_duplos_idxs)}")
 

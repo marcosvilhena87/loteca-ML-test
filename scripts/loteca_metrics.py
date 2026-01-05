@@ -75,16 +75,71 @@ def _ev_from_probabilities(
     return float(ev_samples.mean()), float(np.percentile(ev_samples, 10)), float(np.percentile(ev_samples, 90))
 
 
-def _select_duplo_indices(probabilities: np.ndarray, alpha: float, duplo_count: int) -> np.ndarray:
+def _select_duplo_indices(
+    probabilities: np.ndarray,
+    alpha: float,
+    duplo_count: int,
+    *,
+    rateio_14_samples: np.ndarray | None = None,
+    rateio_13_samples: np.ndarray | None = None,
+    w14: float = 1.0,
+    w13: float = 1.0,
+    card_cost: float = 0.0,
+) -> np.ndarray:
+    """Select duplos maximizing expected-value gains when rateios are available.
+
+    Falls back to the legacy p2/p1-based marginal gain when rateio samples are
+    not provided. The ``alpha`` parameter scales the EV gain by the
+    p2-to-p1 ratio so different alphas change the prioritization instead of
+    only stretching scores.
+    """
+
     epsilon = 1e-12
     adjusted = probabilities + epsilon
     sorted_probs = np.sort(adjusted, axis=1)[:, ::-1]
     p1 = sorted_probs[:, 0]
     p2 = sorted_probs[:, 1]
 
-    marginal_gain = np.log((p1 + (1 + alpha) * p2) / p1)
-    count = min(duplo_count, len(marginal_gain))
-    return np.argsort(marginal_gain)[::-1][:count]
+    if rateio_14_samples is None or rateio_13_samples is None:
+        marginal_gain = np.log((p1 + (1 + alpha) * p2) / p1)
+        count = min(duplo_count, len(marginal_gain))
+        return np.argsort(marginal_gain)[::-1][:count]
+
+    base_probs = [float(prob) for prob in p1]
+    base_hits = compute_hit_probabilities(base_probs)
+    base_ev_mean, _, _ = _ev_from_probabilities(
+        pd.Series([base_hits[14]], index=[0]),
+        pd.Series([base_hits[13]], index=[0]),
+        rateio_14_samples,
+        rateio_13_samples,
+        w14,
+        w13,
+        card_cost,
+    )
+
+    scored_indices = []
+    for idx, (p_top, p_second) in enumerate(zip(p1, p2)):
+        duplo_prob = min(1.0, float(p_top + p_second))
+        adjusted_probs = base_probs.copy()
+        adjusted_probs[idx] = duplo_prob
+        duplo_hits = compute_hit_probabilities(adjusted_probs)
+        duplo_ev_mean, _, _ = _ev_from_probabilities(
+            pd.Series([duplo_hits[14]], index=[0]),
+            pd.Series([duplo_hits[13]], index=[0]),
+            rateio_14_samples,
+            rateio_13_samples,
+            w14,
+            w13,
+            card_cost,
+        )
+        duplo_gain = duplo_ev_mean - base_ev_mean
+        ratio = float(p_second / p_top)
+        score = duplo_gain * (1 + alpha * ratio)
+        scored_indices.append((idx, score))
+
+    count = min(duplo_count, len(scored_indices))
+    scored_indices.sort(key=lambda item: item[1], reverse=True)
+    return np.array([idx for idx, _ in scored_indices[:count]], dtype=int)
 
 
 def _build_card_frame(
@@ -93,6 +148,11 @@ def _build_card_frame(
     class_order: Sequence[str],
     alpha: float,
     duplo_count: int,
+    rateio_14_samples: np.ndarray | None = None,
+    rateio_13_samples: np.ndarray | None = None,
+    w14: float = 1.0,
+    w13: float = 1.0,
+    card_cost: float = 0.0,
 ) -> pd.DataFrame:
     classes = list(class_order)
     top_two_indices = np.argsort(probabilities, axis=1)[:, ::-1]
@@ -105,7 +165,16 @@ def _build_card_frame(
         contest_probs = probabilities[contest_indices]
         duplo_idxs = {
             contest_indices[i]
-            for i in _select_duplo_indices(contest_probs, alpha=alpha, duplo_count=duplo_count)
+            for i in _select_duplo_indices(
+                contest_probs,
+                alpha=alpha,
+                duplo_count=duplo_count,
+                rateio_14_samples=rateio_14_samples,
+                rateio_13_samples=rateio_13_samples,
+                w14=w14,
+                w13=w13,
+                card_cost=card_cost,
+            )
         }
 
         for idx in contest_indices:
@@ -174,9 +243,25 @@ def evaluate_card(
     alpha: float,
     duplo_count: int = 5,
     survival_thresholds: Sequence[int] = (14, 13),
+    rateio_14_samples: np.ndarray | None = None,
+    rateio_13_samples: np.ndarray | None = None,
+    w14: float = 1.0,
+    w13: float = 1.0,
+    card_cost: float = 3.0,
 ) -> CardMetrics:
     probabilities = df[list(prob_columns)].to_numpy(dtype=float)
-    card_df = _build_card_frame(df, probabilities, class_order, alpha, duplo_count)
+    card_df = _build_card_frame(
+        df,
+        probabilities,
+        class_order,
+        alpha,
+        duplo_count,
+        rateio_14_samples=rateio_14_samples,
+        rateio_13_samples=rateio_13_samples,
+        w14=w14,
+        w13=w13,
+        card_cost=card_cost,
+    )
 
     class_to_idx = {c: i for i, c in enumerate(class_order)}
     card_df = _contest_hits(card_df, class_to_idx)

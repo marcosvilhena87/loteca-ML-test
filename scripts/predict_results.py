@@ -153,7 +153,14 @@ def predict(
 
             contest_probs = probabilities[contest_indices]
             duplo_positions = _select_duplo_indices(
-                contest_probs, alpha=duo_alpha, duplo_count=5
+                contest_probs,
+                alpha=duo_alpha,
+                duplo_count=5,
+                rateio_14_samples=rateio_14_samples,
+                rateio_13_samples=rateio_13_samples,
+                w14=w14,
+                w13=w13,
+                card_cost=CUSTO_CARTAO,
             )
             jogos_duplos_idxs.extend(contest_indices[pos] for pos in duplo_positions)
 

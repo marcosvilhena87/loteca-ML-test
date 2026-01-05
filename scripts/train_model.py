@@ -164,6 +164,7 @@ def train(
         c_grid = list(dict.fromkeys(c_values if c_values is not None else DEFAULT_C_VALUES))
         if not c_grid:
             raise ValueError("A grade de valores de C não pode ser vazia.")
+        logging.info("Avaliando %d valores de C na grade: %s", len(c_grid), c_grid)
         market_cols = [f"P_market({c})" for c in CLASS_ORDER]
         val_market = val_df[market_cols].values
         logloss_market = log_loss(y_val, val_market, labels=CLASS_ORDER)
@@ -276,7 +277,8 @@ def train(
 
         best_run = None
         all_runs = []
-        for c_val in c_grid:
+        for idx, c_val in enumerate(c_grid, start=1):
+            logging.info("[%d/%d] Treinando e validando modelo para C=%.3g...", idx, len(c_grid), c_val)
             run = _fit_and_score(c_val)
             delta = logloss_market - run["logloss_model"]
 
@@ -286,6 +288,7 @@ def train(
                 axis=1,
             )
 
+            logging.info("Calculando EV e métricas de cartão para C=%.3g...")
             best_alpha, alpha_df, best_model_metrics, best_market_metrics = _score_alphas(val_eval_df, val_prob_cols)
             ev_model_14 = _ev_medio(best_model_metrics.p14_by_contest, winsorized_rateio_14)
             ev_market_14 = _ev_medio(best_market_metrics.p14_by_contest, winsorized_rateio_14)
@@ -300,6 +303,16 @@ def train(
                 best_market_metrics.p14_by_contest, best_market_metrics.p13_by_contest, winsorized_rateio_14, winsorized_rateio_13
             )
             ev_positive_share = float((ev_model_contest - ev_market_contest > 0).mean()) if not ev_model_contest.empty else 0.0
+
+            logging.info(
+                "[%d/%d] Concluído C=%.3g | alpha ótimo=%.2f | LogLoss=%.4f | EV total diff=%.2f",
+                idx,
+                len(c_grid),
+                c_val,
+                best_alpha,
+                run["logloss_model"],
+                ev_model_total - ev_market_total,
+            )
 
             logging.info(
                 "C=%.3g | LogLoss model=%.4f (delta=%.4f) | EV total diff=%.2f com alpha=%.2f",

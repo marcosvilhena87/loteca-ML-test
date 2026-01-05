@@ -1,7 +1,0 @@
-Total de linhas de entrada: 4393
-Linhas removidas: 347
-Média do overround: 1.0674
-Distribuição de classes (Resultado):
-  1: 1836
-  X: 1146
-  2: 1064

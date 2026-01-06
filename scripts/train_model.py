@@ -1,8 +1,6 @@
 import logging
 import pandas as pd
-from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
 from joblib import dump  # Usando joblib para salvar os modelos
 
 from scripts.preprocess_data import FEATURE_COLUMNS
@@ -10,7 +8,28 @@ from scripts.preprocess_data import FEATURE_COLUMNS
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
-def train(input_file, model_file, scaler_file):
+
+def _temporal_train_test_split(df: pd.DataFrame, target_col: str, test_size: float = 0.2):
+    """Perform a chronological train/test split based on the Concurso order."""
+
+    if "Concurso" in df.columns:
+        df = df.sort_values("Concurso").reset_index(drop=True)
+    else:
+        logging.warning(
+            "Coluna 'Concurso' ausente; utilizando a ordem atual para o split temporal."
+        )
+
+    split_index = int(len(df) * (1 - test_size))
+    if split_index == 0 or split_index == len(df):
+        raise ValueError("Dataset pequeno demais para realizar um split temporal confiável.")
+
+    train_df = df.iloc[:split_index]
+    test_df = df.iloc[split_index:]
+
+    return train_df.drop(columns=[target_col]), test_df.drop(columns=[target_col]), train_df[target_col], test_df[target_col]
+
+
+def train(input_file, model_file):
     """Train a classifier on processed data and persist artifacts.
 
     Parameters
@@ -19,13 +38,11 @@ def train(input_file, model_file, scaler_file):
         CSV file containing training features and labels.
     model_file : str
         Path to save the fitted model.
-    scaler_file : str
-        Path to save the fitted scaler.
 
     Returns
     -------
     None
-        The trained model and scaler are written to disk.
+        The trained model is written to disk.
     """
     try:
         # Carregando os dados
@@ -40,32 +57,28 @@ def train(input_file, model_file, scaler_file):
                 f"As seguintes colunas de feature estão ausentes no dataset: {missing_features}"
             )
 
-        X = df[FEATURE_COLUMNS]
-        y = df['Resultado']
+        split_columns = FEATURE_COLUMNS + ['Resultado']
+        if 'Concurso' in df.columns:
+            split_columns = ['Concurso'] + split_columns
 
-        # Dividindo os dados em treino e teste
-        logging.info("Dividindo os dados em treino e teste...")
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-
-        # Escalando as features
-        logging.info("Escalando as features...")
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
+        # Dividindo os dados em treino e teste de forma temporal
+        logging.info("Dividindo os dados em treino e teste (split temporal)...")
+        X_train, X_test, y_train, y_test = _temporal_train_test_split(df[split_columns], 'Resultado')
+        X_train = X_train.drop(columns=['Concurso'], errors='ignore')
+        X_test = X_test.drop(columns=['Concurso'], errors='ignore')
 
         # Treinando o modelo
         logging.info("Treinando o modelo...")
         model = RandomForestClassifier(random_state=42, n_estimators=100, max_depth=None)
-        model.fit(X_train_scaled, y_train)
+        model.fit(X_train, y_train)
 
         # Avaliando o modelo
-        accuracy = model.score(X_test_scaled, y_test)
+        accuracy = model.score(X_test, y_test)
         logging.info(f"Acurácia no conjunto de teste: {accuracy:.4f}")
 
-        # Salvando o modelo e o scaler
-        logging.info(f"Salvando o modelo em {model_file} e o scaler em {scaler_file}...")
+        # Salvando o modelo
+        logging.info(f"Salvando o modelo em {model_file}...")
         dump(model, model_file)
-        dump(scaler, scaler_file)
 
         logging.info("Treinamento concluído com sucesso!")
     

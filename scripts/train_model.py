@@ -48,71 +48,55 @@ def _create_calibrated_classifier() -> CalibratedClassifierCV:
     return calibrator
 
 
-def _adjust_draw_probabilities(probabilities: np.ndarray, threshold: float) -> np.ndarray:
-    adjusted = probabilities.copy()
-    if adjusted[1] < threshold:
-        adjusted[1] = 0.0
-        total = adjusted.sum()
-        if total > 0:
-            adjusted = adjusted / total
-    return adjusted
-
-
 def _evaluate_draw_thresholds(probabilities: np.ndarray, classes: np.ndarray, y_true: pd.Series, thresholds):
     draw_order = np.array(['1', 'X', '2'])
-    metrics_order = np.array(['1', '2', 'X'])
     ordered = _reorder_probabilities(probabilities, classes, tuple(draw_order))
     best_result = None
 
+    preds_idx = ordered.argmax(axis=1)
+    base_preds = draw_order[preds_idx]
+
     for threshold in thresholds:
-        adjusted_probs = np.apply_along_axis(_adjust_draw_probabilities, 1, ordered, threshold)
-        # Evita problemas numéricos ao calcular logloss
-        adjusted_probs = np.clip(adjusted_probs, 1e-15, 1 - 1e-15)
-        adjusted_probs = adjusted_probs / adjusted_probs.sum(axis=1, keepdims=True)
+        adjusted_preds = []
+        for pred_idx, prob_row in zip(preds_idx, ordered):
+            pred_label = draw_order[pred_idx]
+            if pred_label == 'X' and prob_row[1] < threshold:
+                fallback_idx = 0 if prob_row[0] >= prob_row[2] else 2
+                adjusted_preds.append(draw_order[fallback_idx])
+            else:
+                adjusted_preds.append(pred_label)
 
-        preds_idx = adjusted_probs.argmax(axis=1)
-        preds = draw_order[preds_idx]
-
-        probas_for_metrics = _reorder_probabilities(adjusted_probs, draw_order, tuple(metrics_order))
-
-        acc = accuracy_score(y_true, preds)
-        logloss = log_loss(y_true, probas_for_metrics, labels=metrics_order)
-        brier = _compute_brier_score(y_true, probas_for_metrics, metrics_order)
+        acc = accuracy_score(y_true, adjusted_preds)
+        draw_rate = float(np.mean(base_preds == 'X'))
+        fallback_rate = float(np.mean((base_preds == 'X') & (np.array(adjusted_preds) != 'X')))
+        accepted_draw_rate = float(np.mean(np.array(adjusted_preds) == 'X'))
 
         logging.info(
-            "Threshold %.2f => Acurácia %.4f | LogLoss %.4f | Brier %.4f",
+            "Threshold %.2f => Acurácia %.4f | Empates previstos: %.2f%% | Fallbacks: %.2f%% | Empates mantidos: %.2f%%",
             threshold,
             acc,
-            logloss,
-            brier,
+            draw_rate * 100,
+            fallback_rate * 100,
+            accepted_draw_rate * 100,
         )
 
-        if best_result is None:
-            best_result = {
-                'threshold': threshold,
-                'accuracy': acc,
-                'logloss': logloss,
-                'brier': brier,
-            }
-            continue
-
-        if (logloss < best_result['logloss']) or (
-            np.isclose(logloss, best_result['logloss']) and brier < best_result['brier']
+        if (best_result is None) or (acc > best_result['accuracy']) or (
+            np.isclose(acc, best_result['accuracy']) and fallback_rate < best_result['fallback_rate']
         ):
             best_result = {
                 'threshold': threshold,
                 'accuracy': acc,
-                'logloss': logloss,
-                'brier': brier,
+                'draw_rate': draw_rate,
+                'fallback_rate': fallback_rate,
+                'accepted_draw_rate': accepted_draw_rate,
             }
 
     if best_result:
         logging.info(
-            "Melhor draw_threshold por LogLoss: %.2f (LogLoss %.4f | Brier %.4f | Acurácia %.4f)",
+            "Melhor draw_threshold por acurácia do seco: %.2f (Acurácia %.4f | Fallbacks %.2f%%)",
             best_result['threshold'],
-            best_result['logloss'],
-            best_result['brier'],
             best_result['accuracy'],
+            best_result['fallback_rate'] * 100,
         )
 
     return best_result

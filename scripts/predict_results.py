@@ -1,5 +1,7 @@
 import logging
 import os
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 from joblib import load  # Para carregar os modelos previamente treinados
@@ -28,12 +30,36 @@ def _extract_ordered_probabilities(model, probabilities):
     return ordered
 
 
+def _load_historical_dataframe(
+    historical_file: str,
+    historical_df: Optional[pd.DataFrame] = None,
+    history_max_concurso: Optional[int] = None,
+) -> pd.DataFrame:
+    if historical_df is None:
+        historical_df = pd.read_csv(historical_file, delimiter=";", decimal=".")
+
+    if history_max_concurso is None:
+        return historical_df
+
+    if "Concurso" not in historical_df.columns:
+        raise KeyError("Coluna 'Concurso' ausente no histórico; não é possível aplicar corte temporal.")
+
+    filtered_df = historical_df[historical_df["Concurso"] < history_max_concurso]
+    if filtered_df.empty:
+        raise ValueError(
+            "Nenhum histórico disponível antes do concurso alvo — verifique o CSV de concursos anteriores."
+        )
+    return filtered_df
+
+
 def predict(
     input_file,
     model_file,
     output_file,
     duplo_strategy: str = "entropy",
     historical_file: str = "data/raw/concursos_anteriores.csv",
+    historical_df: Optional[pd.DataFrame] = None,
+    history_max_concurso: Optional[int] = None,
 ):
     """Generate predictions for future games and write them to CSV.
 
@@ -53,6 +79,14 @@ def predict(
         - ``"top_margin"``: picks the five games with the lowest difference between the
           two most probable outcomes (``model_top_margin``), i.e., where the model is
           least confident.
+    historical_file : str
+        Path of the CSV that contains past contests to build historical features.
+        Ignored when ``historical_df`` is provided.
+    historical_df : pandas.DataFrame, optional
+        Pre-loaded historical dataset to avoid re-reading from disk.
+    history_max_concurso : int, optional
+        Exclusive upper bound applied to the "Concurso" column of the historical data
+        to prevent temporal leakage during backtests.
 
     Returns
     -------
@@ -64,13 +98,17 @@ def predict(
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
 
         logging.info("Construindo histórico dos times a partir dos concursos anteriores...")
-        if not os.path.exists(historical_file):
+        if historical_df is None and not os.path.exists(historical_file):
             raise FileNotFoundError(
                 f"Arquivo de histórico não encontrado em '{historical_file}'"
             )
 
-        historical_df = pd.read_csv(historical_file, delimiter=';', decimal='.')
-        history = build_team_history(historical_df)
+        filtered_history_df = _load_historical_dataframe(
+            historical_file,
+            historical_df=historical_df,
+            history_max_concurso=history_max_concurso,
+        )
+        history = build_team_history(filtered_history_df)
 
         logging.info("Gerando o mesmo conjunto de features do treinamento...")
         df_features = add_common_features(df, base_history=history)

@@ -1,5 +1,6 @@
 import logging
 import warnings
+from typing import Dict, Iterable, Tuple
 
 import pandas as pd
 from joblib import dump  # Usando joblib para salvar os modelos
@@ -58,7 +59,44 @@ def _temporal_train_test_split(
     )
 
 
-def train(input_file, model_file):
+def _evaluate_model(
+    model: CalibratedClassifierCV,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+    class_order: Iterable[str],
+) -> Tuple[Dict[str, float], pd.DataFrame]:
+    raw_proba = model.predict_proba(X_test)
+    proba_df = pd.DataFrame(raw_proba, columns=model.classes_)
+    missing_classes = [label for label in class_order if label not in proba_df.columns]
+    if missing_classes:
+        raise ValueError(
+            f"O modelo não retornou probabilidades para as classes: {missing_classes}"
+        )
+
+    y_proba = proba_df[list(class_order)].to_numpy()
+    y_true_bin = pd.get_dummies(y_test).reindex(columns=class_order, fill_value=0).to_numpy()
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Labels passed were.*ordered lexicographically",
+            category=UserWarning,
+        )
+        logloss = log_loss(y_test, y_proba, labels=list(class_order))
+
+    # Brier normalizado: média dos erros quadráticos por classe
+    brier = ((y_proba - y_true_bin) ** 2).mean()
+    accuracy = model.score(X_test, y_test)
+
+    metrics = {
+        "logloss": logloss,
+        "brier": brier,
+        "accuracy": accuracy,
+    }
+    return metrics, proba_df
+
+
+def train(input_file, model_file, calibration_methods: Iterable[str] = ("isotonic", "sigmoid")):
     """Train a classifier on processed data and persist artifacts.
 
     Parameters
@@ -96,49 +134,60 @@ def train(input_file, model_file):
         X_train = X_train.drop(columns=['Concurso'], errors='ignore')
         X_test = X_test.drop(columns=['Concurso'], errors='ignore')
 
-        # Treinando o modelo com calibração de probabilidades
-        logging.info("Treinando o modelo...")
-        base_model = RandomForestClassifier(
-            random_state=42, n_estimators=100, max_depth=None
-        )
-        model = CalibratedClassifierCV(base_model, method="isotonic", cv=3)
-        model.fit(X_train, y_train)
-
-        # Avaliando o modelo
-        raw_proba = model.predict_proba(X_test)
         class_order = ["1", "X", "2"]
-        proba_df = pd.DataFrame(raw_proba, columns=model.classes_)
-        missing_classes = [label for label in class_order if label not in proba_df.columns]
-        if missing_classes:
-            raise ValueError(
-                f"O modelo não retornou probabilidades para as classes: {missing_classes}"
+
+        # Treinando e avaliando múltiplas calibrações
+        metrics_by_method = {}
+        best_method = None
+        best_model = None
+
+        for method in calibration_methods:
+            logging.info("Treinando o modelo com calibração '%s'...", method)
+            base_model = RandomForestClassifier(
+                random_state=42, n_estimators=100, max_depth=None
+            )
+            calibrated_model = CalibratedClassifierCV(base_model, method=method, cv=3)
+            calibrated_model.fit(X_train, y_train)
+
+            metrics, _ = _evaluate_model(calibrated_model, X_test, y_test, class_order)
+            metrics_by_method[method] = metrics
+
+            logging.info(
+                "[%s] LogLoss: %.4f | Brier: %.4f | Acurácia: %.4f",
+                method,
+                metrics["logloss"],
+                metrics["brier"],
+                metrics["accuracy"],
             )
 
-        y_proba = proba_df[class_order].to_numpy()
-        y_true_bin = pd.get_dummies(y_test).reindex(columns=class_order, fill_value=0).to_numpy()
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="Labels passed were.*ordered lexicographically",
-                category=UserWarning,
-            )
-            logloss = log_loss(y_test, y_proba, labels=class_order)
-        brier = ((y_proba - y_true_bin) ** 2).sum(axis=1).mean()
-        accuracy = model.score(X_test, y_test)
+            if best_method is None:
+                best_method = method
+                best_model = calibrated_model
+                continue
 
+            current_best = metrics_by_method[best_method]
+            if metrics["logloss"] < current_best["logloss"] or (
+                metrics["logloss"] == current_best["logloss"]
+                and metrics["accuracy"] > current_best["accuracy"]
+            ):
+                best_method = method
+                best_model = calibrated_model
+
+        best_metrics = metrics_by_method[best_method]
         logging.info(
-            "Métricas no conjunto de teste — LogLoss: %.4f | Brier: %.4f | Acurácia: %.4f",
-            logloss,
-            brier,
-            accuracy,
+            "Melhor calibração: %s — LogLoss: %.4f | Brier: %.4f | Acurácia: %.4f",
+            best_method,
+            best_metrics["logloss"],
+            best_metrics["brier"],
+            best_metrics["accuracy"],
         )
 
-        # Salvando o modelo
+        # Salvando o modelo vencedor
         logging.info(f"Salvando o modelo em {model_file}...")
-        dump(model, model_file)
+        dump(best_model, model_file)
 
         logging.info("Treinamento concluído com sucesso!")
-    
+
     except FileNotFoundError:
         logging.error(f"Erro: O arquivo {input_file} não foi encontrado.")
     except ValueError as e:

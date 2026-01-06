@@ -4,7 +4,7 @@ import pandas as pd
 from joblib import dump
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import GroupShuffleSplit
+from sklearn.model_selection import GroupShuffleSplit, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, log_loss
@@ -86,9 +86,9 @@ def train(input_file, model_file, scaler_file):
         calibrator = CalibratedClassifierCV(
             estimator=base_model,
             method='isotonic',
-            cv=GroupShuffleSplit(n_splits=3, test_size=0.2, random_state=42),
+            cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
         )
-        calibrator.fit(X_train_processed, y_train, groups=groups.iloc[train_idx])
+        calibrator.fit(X_train_processed, y_train)
 
         y_proba = calibrator.predict_proba(X_test_processed)
         y_pred = calibrator.predict(X_test_processed)
@@ -119,7 +119,10 @@ def train(input_file, model_file, scaler_file):
 
     except FileNotFoundError:
         logging.error(f"Erro: O arquivo {input_file} não foi encontrado.")
+        raise
     except ValueError as e:
         logging.error(f"Erro nos dados: {e}")
+        raise
     except Exception as e:
         logging.error(f"Erro inesperado: {e}")
+        raise

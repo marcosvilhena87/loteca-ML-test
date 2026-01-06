@@ -147,6 +147,9 @@ def predict(
         df_features['Entropia'] = -np.sum(probabilities_clipped * np.log(probabilities_clipped), axis=1)
 
         # Gerar a coluna "Aposta"
+        audit_columns = []
+        missing_audit = []
+
         if duplo_strategy not in {"entropy", "top_margin", "market"}:
             raise ValueError(
                 "Estrategia de duplos inválida. Use 'entropy', 'top_margin' ou 'market'."

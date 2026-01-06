@@ -5,6 +5,8 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from joblib import dump  # Usando joblib para salvar os modelos
 
+from scripts.preprocess_data import FEATURE_COLUMNS
+
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -30,10 +32,16 @@ def train(input_file, model_file, scaler_file):
         logging.info("Carregando os dados de entrada...")
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
 
-        # Selecionando as features (probabilidades) e o target (resultado real)
+        # Selecionando as features (probabilidades e contexto) e o target (resultado real)
         logging.info("Selecionando as features e o target...")
-        X = df[['P(1)', 'P(X)', 'P(2)']]  # Features
-        y = df['Resultado']  # Target: 1, X ou 2
+        missing_features = [col for col in FEATURE_COLUMNS if col not in df.columns]
+        if missing_features:
+            raise KeyError(
+                f"As seguintes colunas de feature estão ausentes no dataset: {missing_features}"
+            )
+
+        X = df[FEATURE_COLUMNS]
+        y = df['Resultado']
 
         # Dividindo os dados em treino e teste
         logging.info("Dividindo os dados em treino e teste...")

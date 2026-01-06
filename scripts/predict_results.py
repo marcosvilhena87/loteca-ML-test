@@ -28,9 +28,39 @@ def _selecionar_melhor_combo(valor_cartao_path: str, budget: float) -> dict:
     }
 
 
+def _reordenar_probabilidades(probabilities: np.ndarray, classes: np.ndarray) -> np.ndarray:
+    ordem_desejada = ['1', 'X', '2']
+    class_to_idx = {label: idx for idx, label in enumerate(classes)}
+
+    if not all(label in class_to_idx for label in ordem_desejada):
+        raise ValueError("O modelo não contém todas as classes esperadas ('1', 'X', '2').")
+
+    ordered = np.zeros_like(probabilities)
+    for pos, label in enumerate(ordem_desejada):
+        ordered[:, pos] = probabilities[:, class_to_idx[label]]
+    return ordered
+
+
+def _ajustar_empates(predictions: np.ndarray, probabilities: np.ndarray, threshold: float) -> np.ndarray:
+    if threshold is None:
+        return predictions
+
+    ajustados = []
+    for pred, prob_row in zip(predictions, probabilities):
+        if pred == 'X' and prob_row[1] < threshold:
+            fallback_idx = 0 if prob_row[0] >= prob_row[2] else 2
+            ajustados.append(INDEX_TO_RESULT[fallback_idx])
+        else:
+            ajustados.append(pred)
+    return np.array(ajustados)
+
+
 def predict(input_file, model_file, scaler_file, output_file, budget: float = 50.0,
-            valor_cartao_path: str = 'data/raw/valor_cartao.csv'):
-    """Gera predições enriquecidas e sugestões de aposta dentro de um orçamento."""
+            valor_cartao_path: str = 'data/raw/valor_cartao.csv', draw_threshold: float = 0.35):
+    """Gera predições enriquecidas e sugestões de aposta dentro de um orçamento.
+
+    draw_threshold: probabilidade mínima para aceitar empate como seco.
+    """
     try:
         logging.info("Carregando dados dos jogos futuros...")
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
@@ -38,28 +68,30 @@ def predict(input_file, model_file, scaler_file, output_file, budget: float = 50
         logging.info("Adicionando engenharia de features para o próximo concurso...")
         df = add_engineered_features(df)
 
-        logging.info("Carregando modelo e scaler...")
+        logging.info("Carregando modelo e pré-processador...")
         model = load(model_file)
-        scaler = load(scaler_file)
+        preprocessor = load(scaler_file)
 
         logging.info("Preparando dados para predição...")
         X_future = df[FEATURE_COLUMNS]
-        X_future_scaled = scaler.transform(X_future)
+        X_future_processed = preprocessor.transform(X_future)
 
         logging.info("Gerando predições...")
-        probabilities = model.predict_proba(X_future_scaled)
-        predictions = model.predict(X_future_scaled)
+        probabilities = model.predict_proba(X_future_processed)
+        ordered_probabilities = _reordenar_probabilidades(probabilities, model.classes_)
+        predictions = ordered_probabilities.argmax(axis=1)
 
         logging.info("Adicionando predições ao DataFrame...")
-        df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
-        df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
-        df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)
-        df['Secos'] = predictions
+        df['Probabilidade (1)'] = np.round(ordered_probabilities[:, 0], 5)
+        df['Probabilidade (X)'] = np.round(ordered_probabilities[:, 1], 5)
+        df['Probabilidade (2)'] = np.round(ordered_probabilities[:, 2], 5)
+        secos = np.array([INDEX_TO_RESULT[idx] for idx in predictions])
+        df['Secos'] = _ajustar_empates(secos, ordered_probabilities, draw_threshold)
 
         epsilon = 1e-10
-        adjusted_probabilities = probabilities + epsilon
+        adjusted_probabilities = ordered_probabilities + epsilon
         df['Entropia'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
-        df['p_seco'] = probabilities.max(axis=1)
+        df['p_seco'] = ordered_probabilities.max(axis=1)
         df['risk'] = 1 - df['p_seco']
 
         logging.info("Carregando opções de cartão para respeitar o orçamento...")
@@ -78,7 +110,7 @@ def predict(input_file, model_file, scaler_file, output_file, budget: float = 50
             df.loc[idx, 'Aposta'] = '1, X, 2'
 
         for idx in duplos_idxs:
-            mais_provaveis = probabilities[idx].argsort()[-2:][::-1]
+            mais_provaveis = ordered_probabilities[idx].argsort()[-2:][::-1]
             df.loc[idx, 'Aposta'] = f"{INDEX_TO_RESULT[mais_provaveis[0]]}, {INDEX_TO_RESULT[mais_provaveis[1]]}"
 
         logging.info(f"Custo estimado do cartão: R$ {combo['custo']:.2f}")

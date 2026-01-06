@@ -184,10 +184,17 @@ def add_odds_features(df: pd.DataFrame) -> pd.DataFrame:
         dog_idx = df[ODDS_COLUMNS].values.argmax(axis=1)
         df['fav_index'] = fav_idx
         df['dog_index'] = dog_idx
+
+        for i, label in INDEX_TO_RESULT.items():
+            df[f'fav_is_{label}'] = (fav_idx == i).astype(int)
+            df[f'dog_is_{label}'] = (dog_idx == i).astype(int)
     else:
         df['overround'] = np.nan
         df['fav_index'] = np.nan
         df['dog_index'] = np.nan
+        for _, label in INDEX_TO_RESULT.items():
+            df[f'fav_is_{label}'] = np.nan
+            df[f'dog_is_{label}'] = np.nan
 
     pmax = df[PROB_COLUMNS].max(axis=1)
     p2nd = df[PROB_COLUMNS].apply(lambda row: row.nlargest(2).iloc[-1], axis=1)
@@ -201,6 +208,7 @@ def add_odds_features(df: pd.DataFrame) -> pd.DataFrame:
 FEATURE_COLUMNS_PRE: List[str] = [
     'P(1)', 'P(X)', 'P(2)',
     'overround', 'pmax', 'p2nd', 'gap', 'fav_index', 'dog_index',
+    'fav_is_1', 'fav_is_X', 'fav_is_2', 'dog_is_1', 'dog_is_X', 'dog_is_2',
     'is_neutro', 'home_adv',
     'home_points_last5', 'home_form_last5', 'home_goal_diff5', 'home_btts_rate', 'home_over25_rate',
     'away_points_last5', 'away_form_last5', 'away_goal_diff5', 'away_btts_rate', 'away_over25_rate',

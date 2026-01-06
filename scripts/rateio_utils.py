@@ -21,6 +21,14 @@ def load_rateio(filepath: str) -> pd.DataFrame:
     }
     df = df.rename(columns=rename_map)
 
+    # Padroniza colunas mesmo quando já vêm com sufixos em português
+    if "Rateio_14" not in df.columns and "Rateio_14_Acertos" in df.columns:
+        df["Rateio_14"] = df["Rateio_14_Acertos"]
+    if "Rateio_13" not in df.columns and "Rateio_13_Acertos" in df.columns:
+        df["Rateio_13"] = df["Rateio_13_Acertos"]
+    if "Ganhadores_14" not in df.columns and "Ganhadores_14_Acertos" in df.columns:
+        df["Ganhadores_14"] = df["Ganhadores_14_Acertos"]
+
     if "Rateio_14" not in df.columns:
         raise KeyError("Coluna 'Rateio_14' ausente nos dados de rateio.")
 

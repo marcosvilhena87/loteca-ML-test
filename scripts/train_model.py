@@ -16,12 +16,19 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-def _reorder_probabilities(probabilities: np.ndarray, classes: np.ndarray) -> np.ndarray:
-    ordem_desejada = ['1', 'X', '2']
+def _reorder_probabilities(
+    probabilities: np.ndarray,
+    classes: np.ndarray,
+    order: tuple[str, str, str] = ('1', 'X', '2'),
+) -> np.ndarray:
+    """Reordena as probabilidades seguindo a ordem desejada."""
+    ordem_desejada = list(order)
     class_to_idx = {label: idx for idx, label in enumerate(classes)}
 
     ordered = np.zeros_like(probabilities)
     for pos, label in enumerate(ordem_desejada):
+        if label not in class_to_idx:
+            raise ValueError("O modelo não contém todas as classes esperadas ('1', 'X', '2').")
         ordered[:, pos] = probabilities[:, class_to_idx[label]]
     return ordered
 
@@ -52,8 +59,9 @@ def _adjust_draw_probabilities(probabilities: np.ndarray, threshold: float) -> n
 
 
 def _evaluate_draw_thresholds(probabilities: np.ndarray, classes: np.ndarray, y_true: pd.Series, thresholds):
-    ordered = _reorder_probabilities(probabilities, classes)
-    class_order = np.array(['1', 'X', '2'])
+    draw_order = np.array(['1', 'X', '2'])
+    metrics_order = np.array(['1', '2', 'X'])
+    ordered = _reorder_probabilities(probabilities, classes, tuple(draw_order))
     best_result = None
 
     for threshold in thresholds:
@@ -63,11 +71,13 @@ def _evaluate_draw_thresholds(probabilities: np.ndarray, classes: np.ndarray, y_
         adjusted_probs = adjusted_probs / adjusted_probs.sum(axis=1, keepdims=True)
 
         preds_idx = adjusted_probs.argmax(axis=1)
-        preds = class_order[preds_idx]
+        preds = draw_order[preds_idx]
+
+        probas_for_metrics = _reorder_probabilities(adjusted_probs, draw_order, tuple(metrics_order))
 
         acc = accuracy_score(y_true, preds)
-        logloss = log_loss(y_true, adjusted_probs, labels=class_order)
-        brier = _compute_brier_score(y_true, adjusted_probs, class_order)
+        logloss = log_loss(y_true, probas_for_metrics, labels=metrics_order)
+        brier = _compute_brier_score(y_true, probas_for_metrics, metrics_order)
 
         logging.info(
             "Threshold %.2f => Acurácia %.4f | LogLoss %.4f | Brier %.4f",
@@ -155,11 +165,12 @@ def temporal_backtest(df: pd.DataFrame, block_size: int = 50) -> pd.DataFrame:
         calibrator.fit(X_train_processed, y_train)
 
         y_proba = calibrator.predict_proba(X_test_processed)
+        probas_ordered = _reorder_probabilities(y_proba, calibrator.classes_, tuple(class_order))
         y_pred = calibrator.predict(X_test_processed)
 
         acc = accuracy_score(y_test, y_pred)
-        logloss = log_loss(y_test, y_proba, labels=class_order)
-        brier = _compute_brier_score(y_test, y_proba, class_order)
+        logloss = log_loss(y_test, probas_ordered, labels=class_order)
+        brier = _compute_brier_score(y_test, probas_ordered, class_order)
 
         resultado_bloco = {
             'train_range': f"{train_concursos[0]}-{train_concursos[-1]}",
@@ -183,8 +194,14 @@ def temporal_backtest(df: pd.DataFrame, block_size: int = 50) -> pd.DataFrame:
     return pd.DataFrame(resultados)
 
 
-def train(input_file, model_file, scaler_file):
-    """Treina o classificador com as novas features e persiste os artefatos."""
+def train(input_file, model_file, scaler_file, run_backtest: bool = False):
+    """Treina o classificador com as novas features e persiste os artefatos.
+
+    Parâmetros
+    ----------
+    run_backtest: bool
+        Quando verdadeiro, executa o backtest temporal completo (mais demorado).
+    """
     try:
         logging.info("Carregando os dados de entrada...")
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
@@ -215,12 +232,14 @@ def train(input_file, model_file, scaler_file):
         calibrator.fit(X_train_processed, y_train)
 
         y_proba = calibrator.predict_proba(X_test_processed)
+        metrics_order = np.array(['1', '2', 'X'])
+        probas_for_metrics = _reorder_probabilities(y_proba, calibrator.classes_, tuple(metrics_order))
         y_pred = calibrator.predict(X_test_processed)
 
         accuracy = accuracy_score(y_test, y_pred)
-        logloss = log_loss(y_test, y_proba, labels=calibrator.classes_)
+        logloss = log_loss(y_test, probas_for_metrics, labels=metrics_order)
 
-        brier = _compute_brier_score(y_test, y_proba, calibrator.classes_)
+        brier = _compute_brier_score(y_test, probas_for_metrics, metrics_order)
         brier_avg = brier / len(calibrator.classes_)
         logging.info(f"Acurácia (sanity check) no conjunto de teste: {accuracy:.4f}")
         logging.info(f"LogLoss no conjunto de teste: {logloss:.4f}")
@@ -235,10 +254,11 @@ def train(input_file, model_file, scaler_file):
             thresholds=[0.25, 0.30, 0.35, 0.40],
         )
 
-        logging.info("Rodando backtest temporal em blocos de 50 concursos...")
-        backtest_df = temporal_backtest(df, block_size=50)
-        if not backtest_df.empty:
-            logging.info("Resumo do backtest temporal:\n%s", backtest_df.to_string(index=False))
+        if run_backtest:
+            logging.info("Rodando backtest temporal em blocos de 50 concursos...")
+            backtest_df = temporal_backtest(df, block_size=50)
+            if not backtest_df.empty:
+                logging.info("Resumo do backtest temporal:\n%s", backtest_df.to_string(index=False))
 
         logging.info(f"Salvando o modelo em {model_file} e o pré-processador em {scaler_file}...")
         dump(calibrator, model_file)

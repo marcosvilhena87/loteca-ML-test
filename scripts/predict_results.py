@@ -55,11 +55,20 @@ def _ajustar_empates(predictions: np.ndarray, probabilities: np.ndarray, thresho
     return np.array(ajustados)
 
 
-def predict(input_file, model_file, scaler_file, output_file, budget: float = 50.0,
-            valor_cartao_path: str = 'data/raw/valor_cartao.csv', draw_threshold: float = 0.35):
+def predict(
+    input_file,
+    model_file,
+    scaler_file,
+    output_file,
+    budget: float = 50.0,
+    valor_cartao_path: str = 'data/raw/valor_cartao.csv',
+    draw_threshold: float = 0.35,
+    score_strategy: str = 'risk',
+):
     """Gera predições enriquecidas e sugestões de aposta dentro de um orçamento.
 
     draw_threshold: probabilidade mínima para aceitar empate como seco.
+    score_strategy: como ranquear jogos para duplos/triplos ("risk", "risk_squared", "entropy_risk").
     """
     try:
         logging.info("Carregando dados dos jogos futuros...")
@@ -87,6 +96,7 @@ def predict(input_file, model_file, scaler_file, output_file, budget: float = 50
         df['Probabilidade (2)'] = np.round(ordered_probabilities[:, 2], 5)
         secos = np.array([INDEX_TO_RESULT[idx] for idx in predictions])
         df['Secos'] = _ajustar_empates(secos, ordered_probabilities, draw_threshold)
+        df['Seco'] = df['Secos']  # coluna legada para compatibilidade com análises anteriores
 
         epsilon = 1e-10
         adjusted_probabilities = ordered_probabilities + epsilon
@@ -99,7 +109,14 @@ def predict(input_file, model_file, scaler_file, output_file, budget: float = 50
         logging.info(f"Melhor combinação encontrada: {combo}")
 
         df['Aposta'] = df['Secos']
-        df['score_duplo_tripo'] = df['Entropia'] * df['risk']
+        if score_strategy == 'risk':
+            df['score_duplo_tripo'] = df['risk']
+        elif score_strategy == 'risk_squared':
+            df['score_duplo_tripo'] = df['risk'] ** 2
+        elif score_strategy == 'entropy_risk':
+            df['score_duplo_tripo'] = df['Entropia'] * df['risk']
+        else:
+            raise ValueError("score_strategy deve ser 'risk', 'risk_squared' ou 'entropy_risk'.")
 
         candidatos = df.sort_values(by='score_duplo_tripo', ascending=False).index.tolist()
         triplos_idxs = candidatos[:combo['triplos']]

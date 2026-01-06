@@ -6,6 +6,7 @@ os rateios oficiais e o custo do cartão.
 """
 
 import logging
+from itertools import product
 from typing import Dict, List, Tuple
 
 import pandas as pd
@@ -29,6 +30,27 @@ def _parse_aposta(aposta: str) -> List[str]:
     return [choice.strip() for choice in str(aposta).split(",")]
 
 
+def _expand_bets(pred_df: pd.DataFrame) -> List[List[str]]:
+    """Expande a grade (com duplos/triplos) para todas as combinações de bilhetes."""
+
+    choices_per_game = [_parse_aposta(a) for a in pred_df["Aposta"]]
+    return [list(b) for b in product(*choices_per_game)]
+
+
+def _count_winning_tickets(pred_df: pd.DataFrame, resultados: List[str]) -> Tuple[int, int]:
+    """Conta quantos bilhetes (combinações) fazem 14 e 13 acertos."""
+
+    tickets = _expand_bets(pred_df)
+    w14 = w13 = 0
+    for t in tickets:
+        hits = sum(1 for a, r in zip(t, resultados) if a == r)
+        if hits == 14:
+            w14 += 1
+        elif hits == 13:
+            w13 += 1
+    return w14, w13
+
+
 def _count_bet_types(pred_df: pd.DataFrame) -> Tuple[int, int, int]:
     secos = duplos = triplos = 0
     for aposta in pred_df["Aposta"]:
@@ -45,6 +67,14 @@ def _count_bet_types(pred_df: pd.DataFrame) -> Tuple[int, int, int]:
 def _lookup_bet_cost(
     secos: int, duplos: int, triplos: int, valor_df: pd.DataFrame
 ) -> Tuple[int, float]:
+    apostas_col = "Nº de Apostas" if "Nº de Apostas" in valor_df.columns else "Num_de_Apostas"
+    valor_col = "Valor" if "Valor" in valor_df.columns else "Valor_da_Aposta"
+
+    if apostas_col not in valor_df.columns:
+        raise KeyError("Coluna de número de apostas não encontrada na tabela de valores.")
+    if valor_col not in valor_df.columns:
+        raise KeyError("Coluna de valor de aposta não encontrada na tabela de valores.")
+
     match = valor_df[
         (valor_df["Secos"] == secos)
         & (valor_df["Duplos"] == duplos)
@@ -56,7 +86,7 @@ def _lookup_bet_cost(
         )
 
     row = match.iloc[0]
-    return int(row["Nº de Apostas"]), float(row["Valor"])
+    return int(row[apostas_col]), float(row[valor_col])
 
 
 def _evaluate_hits(merged_df: pd.DataFrame) -> int:
@@ -99,6 +129,7 @@ def backtest(
     if merged["Resultado"].isna().any():
         raise ValueError("Resultados reais ausentes para alguns jogos deste concurso.")
 
+    merged = merged.sort_values("Jogo")
     total_hits = _evaluate_hits(merged)
     logging.info("Total de acertos: %d", total_hits)
 
@@ -115,11 +146,15 @@ def backtest(
         raise ValueError(f"Rateio não encontrado para o concurso {concurso_id}.")
 
     rateio_row = rateio_row.iloc[0]
-    payout = 0.0
-    if total_hits >= 14:
-        payout = float(rateio_row["Rateio_14"])
-    elif total_hits == 13 and "Rateio_13" in rateio_row.index:
-        payout = float(rateio_row["Rateio_13"])
+    resultados = merged["Resultado"].tolist()
+
+    w14, w13 = _count_winning_tickets(pred_df, resultados)
+    logging.info("Bilhetes vencedores — 14: %d | 13: %d", w14, w13)
+
+    rateio14 = float(rateio_row["Rateio_14"])
+    rateio13 = float(rateio_row["Rateio_13"]) if "Rateio_13" in rateio_row.index else 0.0
+
+    payout = w14 * rateio14 + w13 * rateio13
 
     ev = payout - cost
 
@@ -129,6 +164,8 @@ def backtest(
         "n_apostas": n_apostas,
         "custo": cost,
         "retorno": payout,
+        "w14": w14,
+        "w13": w13,
         "ev": ev,
     }
 

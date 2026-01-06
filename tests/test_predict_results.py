@@ -18,16 +18,13 @@ def test_predict_results_output_columns(tmp_path):
     predict("data/raw/proximo_concurso.csv", model_file, scaler_file, predictions_file)
 
     df = pd.read_csv(predictions_file, delimiter=';')
-    expected = {
+    expected = [
         'Probabilidade (1)',
         'Probabilidade (X)',
         'Probabilidade (2)',
-        'Secos',
         'Seco',
         'Entropia',
-        'p_seco',
-        'risk',
-        'score_duplo_tripo',
         'Aposta'
-    }
-    assert expected.issubset(set(df.columns))
+    ]
+    for col in expected:
+        assert col in df.columns

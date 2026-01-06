@@ -2,7 +2,7 @@ import logging
 import pandas as pd
 from joblib import dump
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
@@ -23,10 +23,15 @@ def train(input_file, model_file, scaler_file):
         X = df[FEATURE_COLUMNS]
         y = df['Resultado']
 
-        logging.info("Dividindo os dados em treino e teste...")
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
+        logging.info("Dividindo os dados em treino e teste por concurso...")
+        if 'Concurso' not in df.columns:
+            raise KeyError("Coluna 'Concurso' é necessária para o group split.")
+
+        groups = df['Concurso']
+        splitter = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        train_idx, test_idx = next(splitter.split(X, y, groups=groups))
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
         logging.info("Criando pipeline de imputação e padronização...")
         scaler = Pipeline([

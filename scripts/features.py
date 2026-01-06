@@ -198,7 +198,7 @@ def add_odds_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-FEATURE_COLUMNS: List[str] = [
+FEATURE_COLUMNS_PRE: List[str] = [
     'P(1)', 'P(X)', 'P(2)',
     'overround', 'pmax', 'p2nd', 'gap', 'fav_index', 'dog_index',
     'is_neutro', 'home_adv',
@@ -206,6 +206,13 @@ FEATURE_COLUMNS: List[str] = [
     'away_points_last5', 'away_form_last5', 'away_goal_diff5', 'away_btts_rate', 'away_over25_rate',
     'form_diff', 'gf5_diff', 'ga5_diff',
 ]
+
+GOAL_FEATURES: List[str] = ['goal_diff', 'total_goals', 'is_over_25', 'is_btts']
+
+FEATURE_COLUMNS_POST: List[str] = FEATURE_COLUMNS_PRE + GOAL_FEATURES
+
+# Exporta apenas as colunas pré-jogo para evitar vazamento em treino/predição
+FEATURE_COLUMNS: List[str] = FEATURE_COLUMNS_PRE
 
 
 def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:

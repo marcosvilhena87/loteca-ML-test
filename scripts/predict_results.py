@@ -59,13 +59,15 @@ def predict(input_file, model_file, scaler_file, output_file, budget: float = 50
         epsilon = 1e-10
         adjusted_probabilities = probabilities + epsilon
         df['Entropia'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
+        df['p_seco'] = probabilities.max(axis=1)
+        df['risk'] = 1 - df['p_seco']
 
         logging.info("Carregando opções de cartão para respeitar o orçamento...")
         combo = _selecionar_melhor_combo(valor_cartao_path, budget)
         logging.info(f"Melhor combinação encontrada: {combo}")
 
         df['Aposta'] = df['Secos']
-        df['score_duplo_tripo'] = df['Entropia'] * (1 - df['gap'])
+        df['score_duplo_tripo'] = df['Entropia'] * df['risk']
 
         candidatos = df.sort_values(by='score_duplo_tripo', ascending=False).index.tolist()
         triplos_idxs = candidatos[:combo['triplos']]

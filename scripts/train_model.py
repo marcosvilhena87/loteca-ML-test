@@ -49,72 +49,53 @@ def _create_calibrated_classifier() -> CalibratedClassifierCV:
 
 
 def _evaluate_draw_thresholds(probabilities: np.ndarray, classes: np.ndarray, y_true: pd.Series, thresholds):
-    draw_order = np.array(['1', 'X', '2'])
-    ordered = _reorder_probabilities(probabilities, classes, tuple(draw_order))
-    best_result = None
+    ordered = _reorder_probabilities(probabilities, classes)
+    class_order = np.array(['1', 'X', '2'])
 
-    preds_idx = ordered.argmax(axis=1)
-    base_preds = draw_order[preds_idx]
+    # LogLoss/Brier "verdadeiros" (probabilidades originais, sem hacks)
+    base_logloss = log_loss(y_true, np.clip(ordered, 1e-15, 1 - 1e-15), labels=class_order)
+    base_brier = _compute_brier_score(y_true, ordered, class_order)
 
+    best = None
     for threshold in thresholds:
-        adjusted_preds = []
-        for pred_idx, prob_row in zip(preds_idx, ordered):
-            pred_label = draw_order[pred_idx]
-            if pred_label == 'X' and prob_row[1] < threshold:
-                fallback_idx = 0 if prob_row[0] >= prob_row[2] else 2
-                adjusted_preds.append(draw_order[fallback_idx])
-            else:
-                adjusted_preds.append(pred_label)
+        preds_idx = ordered.argmax(axis=1)
+        preds = class_order[preds_idx].copy()
 
-        adjusted_array = np.array(adjusted_preds)
-        acc = accuracy_score(y_true, adjusted_array)
-        draw_rate = float(np.mean(base_preds == 'X'))
-        fallback_rate = float(np.mean((base_preds == 'X') & (adjusted_array != 'X')))
-        accepted_draw_rate = float(np.mean(adjusted_array == 'X'))
+        # Ajuste igual ao predict_results.py: só troca o SECO quando previu X com prob baixa
+        mask = (preds == 'X') & (ordered[:, 1] < threshold)
+        if mask.any():
+            # fallback: escolhe 1 se P(1) >= P(2) senão 2
+            fallback = np.where(ordered[:, 0] >= ordered[:, 2], '1', '2')
+            preds[mask] = fallback[mask]
 
-        draw_precision = precision_score(
-            y_true == 'X', adjusted_array == 'X', zero_division=0
-        )
-        draw_recall = recall_score(
-            y_true == 'X', adjusted_array == 'X', zero_division=0
-        )
-        draw_f1 = f1_score(y_true == 'X', adjusted_array == 'X', zero_division=0)
+        acc = accuracy_score(y_true, preds)
+
+        # Métricas focadas em empate (opcional, mas útil)
+        y_true_x = (y_true.values == 'X')
+        y_pred_x = (preds == 'X')
+        prec_x = precision_score(y_true_x, y_pred_x, zero_division=0)
+        rec_x = recall_score(y_true_x, y_pred_x, zero_division=0)
+        f1_x = f1_score(y_true_x, y_pred_x, zero_division=0)
 
         logging.info(
-            "Threshold %.2f => Acurácia %.4f | Precision(X) %.4f | Recall(X) %.4f | F1(X) %.4f | Empates previstos: %.2f%% | Fallbacks: %.2f%% | Empates mantidos: %.2f%%",
-            threshold,
-            acc,
-            draw_precision,
-            draw_recall,
-            draw_f1,
-            draw_rate * 100,
-            fallback_rate * 100,
-            accepted_draw_rate * 100,
+            "Threshold %.2f => Acurácia %.4f | PrecX %.4f | RecX %.4f | F1X %.4f | (LogLoss fixo %.4f | Brier fixo %.4f)",
+            threshold, acc, prec_x, rec_x, f1_x, base_logloss, base_brier
         )
 
-        if (best_result is None) or (acc > best_result['accuracy']) or (
-            np.isclose(acc, best_result['accuracy']) and fallback_rate < best_result['fallback_rate']
+        # escolha do melhor threshold: maximize acurácia, desempata por F1 do X (ou rec_x, você decide)
+        cand = {'threshold': threshold, 'accuracy': acc, 'f1_x': f1_x, 'prec_x': prec_x, 'rec_x': rec_x}
+        if (best is None) or (cand['accuracy'] > best['accuracy']) or (
+            np.isclose(cand['accuracy'], best['accuracy']) and cand['f1_x'] > best['f1_x']
         ):
-            best_result = {
-                'threshold': threshold,
-                'accuracy': acc,
-                'draw_rate': draw_rate,
-                'fallback_rate': fallback_rate,
-                'accepted_draw_rate': accepted_draw_rate,
-                'draw_precision': draw_precision,
-                'draw_recall': draw_recall,
-                'draw_f1': draw_f1,
-            }
+            best = cand
 
-    if best_result:
+    if best:
         logging.info(
-            "Melhor draw_threshold por acurácia do seco: %.2f (Acurácia %.4f | Fallbacks %.2f%%)",
-            best_result['threshold'],
-            best_result['accuracy'],
-            best_result['fallback_rate'] * 100,
+            "Melhor draw_threshold por decisão: %.2f (Acurácia %.4f | F1X %.4f | PrecX %.4f | RecX %.4f)",
+            best['threshold'], best['accuracy'], best['f1_x'], best['prec_x'], best['rec_x']
         )
 
-    return best_result
+    return best
 
 
 def temporal_backtest(df: pd.DataFrame, block_size: int = 50) -> pd.DataFrame:

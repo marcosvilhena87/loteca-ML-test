@@ -1,11 +1,13 @@
 import logging
+import numpy as np
 import pandas as pd
 from joblib import dump
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, brier_score_loss, log_loss
+from sklearn.metrics import accuracy_score, log_loss
+from sklearn.preprocessing import label_binarize
 
 from scripts.features import FEATURE_COLUMNS
 
@@ -49,7 +51,9 @@ def train(input_file, model_file, scaler_file):
 
         accuracy = accuracy_score(y_test, y_pred)
         logloss = log_loss(y_test, y_proba, labels=model.classes_)
-        brier = brier_score_loss(y_test, y_proba, multi_class='ovr')
+
+        y_true_bin = label_binarize(y_test, classes=model.classes_)
+        brier = float(np.mean(np.sum((y_proba - y_true_bin) ** 2, axis=1)))
         logging.info(f"Acurácia (sanity check) no conjunto de teste: {accuracy:.4f}")
         logging.info(f"LogLoss no conjunto de teste: {logloss:.4f}")
         logging.info(f"Brier Score no conjunto de teste: {brier:.4f}")

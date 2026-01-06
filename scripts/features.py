@@ -202,7 +202,6 @@ FEATURE_COLUMNS: List[str] = [
     'P(1)', 'P(X)', 'P(2)',
     'overround', 'pmax', 'p2nd', 'gap', 'fav_index', 'dog_index',
     'is_neutro', 'home_adv',
-    'goal_diff', 'total_goals', 'is_over_25', 'is_btts',
     'home_points_last5', 'home_form_last5', 'home_goal_diff5', 'home_btts_rate', 'home_over25_rate',
     'away_points_last5', 'away_form_last5', 'away_goal_diff5', 'away_btts_rate', 'away_over25_rate',
     'form_diff', 'gf5_diff', 'ga5_diff',

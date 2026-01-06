@@ -7,7 +7,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GroupShuffleSplit, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, log_loss
+from sklearn.metrics import accuracy_score, f1_score, log_loss, precision_score, recall_score
 from sklearn.preprocessing import label_binarize
 
 from scripts.features import FEATURE_COLUMNS
@@ -66,15 +66,27 @@ def _evaluate_draw_thresholds(probabilities: np.ndarray, classes: np.ndarray, y_
             else:
                 adjusted_preds.append(pred_label)
 
-        acc = accuracy_score(y_true, adjusted_preds)
+        adjusted_array = np.array(adjusted_preds)
+        acc = accuracy_score(y_true, adjusted_array)
         draw_rate = float(np.mean(base_preds == 'X'))
-        fallback_rate = float(np.mean((base_preds == 'X') & (np.array(adjusted_preds) != 'X')))
-        accepted_draw_rate = float(np.mean(np.array(adjusted_preds) == 'X'))
+        fallback_rate = float(np.mean((base_preds == 'X') & (adjusted_array != 'X')))
+        accepted_draw_rate = float(np.mean(adjusted_array == 'X'))
+
+        draw_precision = precision_score(
+            y_true == 'X', adjusted_array == 'X', zero_division=0
+        )
+        draw_recall = recall_score(
+            y_true == 'X', adjusted_array == 'X', zero_division=0
+        )
+        draw_f1 = f1_score(y_true == 'X', adjusted_array == 'X', zero_division=0)
 
         logging.info(
-            "Threshold %.2f => Acurácia %.4f | Empates previstos: %.2f%% | Fallbacks: %.2f%% | Empates mantidos: %.2f%%",
+            "Threshold %.2f => Acurácia %.4f | Precision(X) %.4f | Recall(X) %.4f | F1(X) %.4f | Empates previstos: %.2f%% | Fallbacks: %.2f%% | Empates mantidos: %.2f%%",
             threshold,
             acc,
+            draw_precision,
+            draw_recall,
+            draw_f1,
             draw_rate * 100,
             fallback_rate * 100,
             accepted_draw_rate * 100,
@@ -89,6 +101,9 @@ def _evaluate_draw_thresholds(probabilities: np.ndarray, classes: np.ndarray, y_
                 'draw_rate': draw_rate,
                 'fallback_rate': fallback_rate,
                 'accepted_draw_rate': accepted_draw_rate,
+                'draw_precision': draw_precision,
+                'draw_recall': draw_recall,
+                'draw_f1': draw_f1,
             }
 
     if best_result:

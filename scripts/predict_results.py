@@ -1,6 +1,7 @@
 import logging
-import pandas as pd
+import os
 import numpy as np
+import pandas as pd
 from joblib import load  # Para carregar os modelos previamente treinados
 
 from scripts.preprocess_data import (
@@ -27,7 +28,12 @@ def _extract_ordered_probabilities(model, probabilities):
     return ordered
 
 
-def predict(input_file, model_file, output_file):
+def predict(
+    input_file,
+    model_file,
+    output_file,
+    historical_file: str = "data/raw/concursos_anteriores.csv",
+):
     """Generate predictions for future games and write them to CSV.
 
     Parameters
@@ -49,7 +55,12 @@ def predict(input_file, model_file, output_file):
         df = pd.read_csv(input_file, delimiter=';', decimal='.')
 
         logging.info("Construindo histórico dos times a partir dos concursos anteriores...")
-        historical_df = pd.read_csv("data/raw/concursos_anteriores.csv", delimiter=';', decimal='.')
+        if not os.path.exists(historical_file):
+            raise FileNotFoundError(
+                f"Arquivo de histórico não encontrado em '{historical_file}'"
+            )
+
+        historical_df = pd.read_csv(historical_file, delimiter=';', decimal='.')
         history = build_team_history(historical_df)
 
         logging.info("Gerando o mesmo conjunto de features do treinamento...")
@@ -70,6 +81,7 @@ def predict(input_file, model_file, output_file):
         raw_probabilities = model.predict_proba(X_future)
         ordered_probabilities = _extract_ordered_probabilities(model, raw_probabilities)
         predictions = model.predict(X_future)
+        sorted_probs = np.sort(ordered_probabilities.to_numpy())[:, ::-1]
 
         # Adicionando as predições ao DataFrame
         logging.info("Adicionando predições ao DataFrame...")
@@ -77,6 +89,7 @@ def predict(input_file, model_file, output_file):
         df_features['Probabilidade (X)'] = np.round(ordered_probabilities['X'].to_numpy(), 5)
         df_features['Probabilidade (2)'] = np.round(ordered_probabilities['2'].to_numpy(), 5)
         df_features['Seco'] = predictions
+        df_features['model_top_margin'] = np.round(sorted_probs[:, 0] - sorted_probs[:, 1], 5)
 
         # Calculando a entropia com clipping para estabilidade numérica
         logging.info("Calculando entropia para determinar os jogos mais incertos...")

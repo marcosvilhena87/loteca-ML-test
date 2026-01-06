@@ -1,7 +1,0 @@
-Sugestões para integrar os dados mais relevantes dos arquivos em data/raw ao pipeline:
-concursos_anteriores.csv: Concurso Jogo Gols_Home Mandante Visitante Gols_Away Mando [1] [x] [2] Odds_1 Odds_X Odds_2 Home_Last5_Home Away_Last5_Away 
-proximo_concurso.csv: Concurso Jogo Mandante Visitante Mando Odds_1 Odds_X Odds_2 Home_Last5_Home Away_Last5_Away 
-concurso_rateio.csv: Concurso	Ganhadores_14_Acertos	Rateio_14_Acertos	Ganhadores_13_Acertos	Rateio_13_Acertos	Arrecadacao_Total
-valor_cartao.csv: Secos	Duplos	Triplos	Num_de_Apostas	Valor_da_Aposta
-
-Coluna Mando é Mandante ou Neutro

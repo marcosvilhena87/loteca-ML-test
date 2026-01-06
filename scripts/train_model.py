@@ -5,7 +5,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, brier_score_loss, log_loss
 
 from scripts.features import FEATURE_COLUMNS
 
@@ -33,24 +33,30 @@ def train(input_file, model_file, scaler_file):
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
-        logging.info("Criando pipeline de imputação e padronização...")
-        scaler = Pipeline([
+        logging.info("Criando pipeline de imputação...")
+        preprocessor = Pipeline([
             ('imputer', SimpleImputer(strategy='median')),
-            ('scaler', StandardScaler()),
         ])
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
+        X_train_processed = preprocessor.fit_transform(X_train)
+        X_test_processed = preprocessor.transform(X_test)
 
         logging.info("Treinando o modelo de floresta aleatória...")
         model = RandomForestClassifier(random_state=42, n_estimators=200, max_depth=None)
-        model.fit(X_train_scaled, y_train)
+        model.fit(X_train_processed, y_train)
 
-        accuracy = model.score(X_test_scaled, y_test)
-        logging.info(f"Acurácia no conjunto de teste: {accuracy:.4f}")
+        y_proba = model.predict_proba(X_test_processed)
+        y_pred = model.predict(X_test_processed)
 
-        logging.info(f"Salvando o modelo em {model_file} e o scaler em {scaler_file}...")
+        accuracy = accuracy_score(y_test, y_pred)
+        logloss = log_loss(y_test, y_proba, labels=model.classes_)
+        brier = brier_score_loss(y_test, y_proba, multi_class='ovr')
+        logging.info(f"Acurácia (sanity check) no conjunto de teste: {accuracy:.4f}")
+        logging.info(f"LogLoss no conjunto de teste: {logloss:.4f}")
+        logging.info(f"Brier Score no conjunto de teste: {brier:.4f}")
+
+        logging.info(f"Salvando o modelo em {model_file} e o pré-processador em {scaler_file}...")
         dump(model, model_file)
-        dump(scaler, scaler_file)
+        dump(preprocessor, scaler_file)
         logging.info("Treinamento concluído com sucesso!")
 
     except FileNotFoundError:

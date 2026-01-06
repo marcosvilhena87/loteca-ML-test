@@ -110,17 +110,21 @@ def predict(
 
         df['Aposta'] = df['Secos']
         if score_strategy == 'risk':
-            df['score_duplo_tripo'] = df['risk']
+            base_score = df['risk']
         elif score_strategy == 'risk_squared':
-            df['score_duplo_tripo'] = df['risk'] ** 2
+            base_score = df['risk'] ** 2
         elif score_strategy == 'entropy_risk':
-            df['score_duplo_tripo'] = df['Entropia'] * df['risk']
+            base_score = df['Entropia'] * df['risk']
         else:
             raise ValueError("score_strategy deve ser 'risk', 'risk_squared' ou 'entropy_risk'.")
 
-        candidatos = df.sort_values(by='score_duplo_tripo', ascending=False).index.tolist()
-        triplos_idxs = candidatos[:combo['triplos']]
-        duplos_idxs = candidatos[combo['triplos']: combo['triplos'] + combo['duplos']]
+        df['score_duplo_tripo'] = base_score
+        df['duplo_score'] = base_score * df['p2nd'] * (1 - df['gap'])
+        df['triplo_score'] = df['Entropia'] * base_score
+
+        triplos_idxs = df.sort_values(by='triplo_score', ascending=False).index.tolist()[:combo['triplos']]
+        duplo_pool = df.drop(index=triplos_idxs)
+        duplos_idxs = duplo_pool.sort_values(by='duplo_score', ascending=False).index.tolist()[:combo['duplos']]
 
         logging.info("Aplicando triplos e duplos nos jogos mais incertos...")
         for idx in triplos_idxs:
@@ -131,6 +135,12 @@ def predict(
             df.loc[idx, 'Aposta'] = f"{INDEX_TO_RESULT[mais_provaveis[0]]}, {INDEX_TO_RESULT[mais_provaveis[1]]}"
 
         logging.info(f"Custo estimado do cartão: R$ {combo['custo']:.2f}")
+
+        df['Config_Secos'] = combo['secos']
+        df['Config_Duplos'] = combo['duplos']
+        df['Config_Triplos'] = combo['triplos']
+        df['Config_Custo'] = combo['custo']
+        df['Score_Strategy'] = score_strategy
 
         logging.info(f"Salvando predições no arquivo {output_file}...")
         df.to_csv(output_file, sep=';', index=False)

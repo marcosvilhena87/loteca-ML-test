@@ -32,14 +32,20 @@ def ensure_probabilities(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_mando_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Cria features derivadas do mando de campo."""
+    """Cria features derivadas do mando de campo.
+
+    Considera variações comuns de texto para campo neutro e, na ausência da
+    coluna, assume mando do time da casa para manter o contrato de features.
+    """
+
     if 'Mando' in df.columns:
         mando_clean = df['Mando'].fillna('').astype(str).str.lower().str.strip()
-        df['is_neutro'] = (mando_clean == 'neutro').astype(int)
+        neutro_mask = mando_clean.str.contains(r"neutro", regex=True) | (mando_clean == 'n')
+        df['is_neutro'] = neutro_mask.astype(int)
         df['home_adv'] = 1 - df['is_neutro']
     else:
-        df['is_neutro'] = np.nan
-        df['home_adv'] = np.nan
+        df['is_neutro'] = 0
+        df['home_adv'] = 1
     return df
 
 
@@ -82,7 +88,7 @@ def _parse_last5_entry(entry: str) -> Dict[str, float]:
     if not entry or not isinstance(entry, str):
         return metrics
 
-    tokens = _split_last5(entry)
+    tokens = _split_last5(entry)[:5]
     metrics['games'] = len(tokens)
 
     for token in tokens:

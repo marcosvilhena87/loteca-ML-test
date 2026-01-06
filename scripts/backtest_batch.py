@@ -51,7 +51,7 @@ def backtest_batch(
     rateio_file: str = "data/raw/concurso_rateio.csv",
     valor_cartao_file: str = "data/raw/valor_cartao.csv",
     output_dir: str = "output/backtest_batch",
-    duplo_strategies: Iterable[str] = ("entropy", "top_margin"),
+    duplo_strategies: Iterable[str] = ("entropy", "top_margin", "market"),
 ):
     logging.info("Carregando concursos anteriores...")
     historical_df = pd.read_csv(historical_file, delimiter=";", decimal=".")
@@ -152,7 +152,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--duplo_strategies",
         nargs="+",
-        default=["entropy", "top_margin"],
+        default=["entropy", "top_margin", "market"],
         help="Estratégias de duplo a serem comparadas",
     )
 

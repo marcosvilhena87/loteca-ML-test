@@ -79,6 +79,8 @@ def predict(
         - ``"top_margin"``: picks the five games with the lowest difference between the
           two most probable outcomes (``model_top_margin``), i.e., where the model is
           least confident.
+        - ``"market"``: ignores the model confidence and always picks the single most
+          likely outcome implied by the betting odds (baseline seco).
     historical_file : str
         Path of the CSV that contains past contests to build historical features.
         Ignored when ``historical_df`` is provided.
@@ -130,6 +132,7 @@ def predict(
         predictions = model.predict(X_future)
         sorted_probs = np.sort(ordered_probabilities.to_numpy())[:, ::-1]
 
+
         # Adicionando as predições ao DataFrame
         logging.info("Adicionando predições ao DataFrame...")
         df_features['Probabilidade (1)'] = np.round(ordered_probabilities['1'].to_numpy(), 5)
@@ -143,49 +146,48 @@ def predict(
         probabilities_clipped = np.clip(ordered_probabilities.to_numpy(), 1e-12, 1.0)
         df_features['Entropia'] = -np.sum(probabilities_clipped * np.log(probabilities_clipped), axis=1)
 
-        # Identificar os 5 jogos mais incertos para aplicar os "duplos"
-        if duplo_strategy not in {"entropy", "top_margin"}:
-            raise ValueError(
-                "Estrategia de duplos inválida. Use 'entropy' ou 'top_margin'."
-            )
-
-        if duplo_strategy == "entropy":
-            jogos_duplos_idxs = df_features.nlargest(5, 'Entropia').index
-            logging.info(
-                "Selecionando duplos pelos maiores valores de entropia: %s",
-                jogos_duplos_idxs.tolist(),
-            )
-        else:
-            jogos_duplos_idxs = df_features.nsmallest(5, 'model_top_margin').index
-            logging.info(
-                "Selecionando duplos pelos menores valores de model_top_margin: %s",
-                jogos_duplos_idxs.tolist(),
-            )
-
         # Gerar a coluna "Aposta"
-        logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
-        df_features['Aposta'] = df_features['Seco']  # Copia as apostas secas inicialmente
+        if duplo_strategy not in {"entropy", "top_margin", "market"}:
+            raise ValueError(
+                "Estrategia de duplos inválida. Use 'entropy', 'top_margin' ou 'market'."
+            )
 
-        # Escolhendo os "duplos" para os 5 jogos mais incertos
-        duplo_opcoes = ['1', 'X', '2']
-        prob_matrix = ordered_probabilities.to_numpy()
-        for idx in jogos_duplos_idxs:
-            mais_provaveis = prob_matrix[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
-            df_features.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"
+        if duplo_strategy == "market":
+            logging.info(
+                "Aplicando baseline de mercado: secos no maior P(·) implícito nas odds."
+            )
+            aposta_cols = ['P(1)', 'P(X)', 'P(2)']
+            aposta_map = dict(zip(aposta_cols, ['1', 'X', '2']))
+            df_features['Aposta'] = (
+                df_features[aposta_cols]
+                .idxmax(axis=1)
+                .map(aposta_map)
+            )
+            df_features['Seco'] = df_features['Aposta']
+        else:
+            if duplo_strategy == "entropy":
+                jogos_duplos_idxs = df_features.nlargest(5, 'Entropia').index
+                logging.info(
+                    "Selecionando duplos pelos maiores valores de entropia: %s",
+                    jogos_duplos_idxs.tolist(),
+                )
+            else:
+                jogos_duplos_idxs = df_features.nsmallest(5, 'model_top_margin').index
+                logging.info(
+                    "Selecionando duplos pelos menores valores de model_top_margin: %s",
+                    jogos_duplos_idxs.tolist(),
+                )
 
-        # Garantir que features-chave estejam presentes para auditoria
-        audit_columns = [
-            'pmax',
-            'market_entropy',
-            'history_points_diff',
-            'history_goal_diff_diff',
-            'home_last5_points',
-            'away_last5_points',
-            'is_neutro',
-            'model_top_margin',
-            'Entropia',
-        ]
-        missing_audit = [col for col in audit_columns if col not in df_features.columns]
+            # Gerar a coluna "Aposta" com 9 secos e 5 duplos
+            logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
+            df_features['Aposta'] = df_features['Seco']  # Copia as apostas secas inicialmente
+
+            # Escolhendo os "duplos" para os 5 jogos mais incertos
+            duplo_opcoes = ['1', 'X', '2']
+            prob_matrix = ordered_probabilities.to_numpy()
+            for idx in jogos_duplos_idxs:
+                mais_provaveis = prob_matrix[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
+                df_features.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"
         if missing_audit:
             raise KeyError(
                 f"As seguintes colunas de auditoria estão ausentes no dataset: {missing_audit}"

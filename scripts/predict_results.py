@@ -12,7 +12,22 @@ from scripts.preprocess_data import (
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
-def predict(input_file, model_file, scaler_file, output_file):
+
+def _extract_ordered_probabilities(model, probabilities):
+    """Reorder probability columns according to the class labels 1, X, 2."""
+
+    expected_classes = ['1', 'X', '2']
+    model_classes = list(model.classes_)
+    missing_classes = set(expected_classes) - set(model_classes)
+    if missing_classes:
+        raise ValueError(f"Classes esperadas ausentes no modelo: {missing_classes}")
+
+    prob_df = pd.DataFrame(probabilities, columns=model_classes)
+    ordered = prob_df[expected_classes]
+    return ordered
+
+
+def predict(input_file, model_file, output_file):
     """Generate predictions for future games and write them to CSV.
 
     Parameters
@@ -21,8 +36,6 @@ def predict(input_file, model_file, scaler_file, output_file):
         CSV file with upcoming games and odds or probabilities.
     model_file : str
         Path of the trained model to load.
-    scaler_file : str
-        Path of the scaler used during training.
     output_file : str
         Destination path for the predictions CSV.
 
@@ -44,35 +57,31 @@ def predict(input_file, model_file, scaler_file, output_file):
 
         required_columns = FEATURE_COLUMNS
         
-        # Carregando o modelo e o scaler
-        logging.info("Carregando modelo e scaler...")
+        # Carregando o modelo
+        logging.info("Carregando modelo...")
         model = load(model_file)
-        scaler = load(scaler_file)
 
-        # Selecionando as features para predição e escalando
+        # Selecionando as features para predição
         logging.info("Preparando dados para predição...")
         X_future = df_features[required_columns]
-        X_future_scaled = scaler.transform(X_future)
 
         # Gerando as predições
         logging.info("Gerando predições...")
-        probabilities = model.predict_proba(X_future_scaled)
-        predictions = model.predict(X_future_scaled)
+        raw_probabilities = model.predict_proba(X_future)
+        ordered_probabilities = _extract_ordered_probabilities(model, raw_probabilities)
+        predictions = model.predict(X_future)
 
         # Adicionando as predições ao DataFrame
         logging.info("Adicionando predições ao DataFrame...")
-        df_features['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
-        df_features['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
-        df_features['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)
-        df_features['Secos'] = predictions
+        df_features['Probabilidade (1)'] = np.round(ordered_probabilities['1'].to_numpy(), 5)
+        df_features['Probabilidade (X)'] = np.round(ordered_probabilities['X'].to_numpy(), 5)
+        df_features['Probabilidade (2)'] = np.round(ordered_probabilities['2'].to_numpy(), 5)
+        df_features['Seco'] = predictions
 
-        # Adicionando um valor pequeno para evitar problemas com log(0)
-        epsilon = 1e-10
-        adjusted_probabilities = probabilities + epsilon
-
-        # Calculando a entropia com as probabilidades ajustadas
+        # Calculando a entropia com clipping para estabilidade numérica
         logging.info("Calculando entropia para determinar os jogos mais incertos...")
-        df_features['Entropia'] = -np.sum(adjusted_probabilities * np.log(adjusted_probabilities), axis=1)
+        probabilities_clipped = np.clip(ordered_probabilities.to_numpy(), 1e-12, 1.0)
+        df_features['Entropia'] = -np.sum(probabilities_clipped * np.log(probabilities_clipped), axis=1)
 
         # Identificar os 5 jogos mais incertos para aplicar os "duplos"
         jogos_duplos_idxs = df_features.nlargest(5, 'Entropia').index
@@ -80,12 +89,13 @@ def predict(input_file, model_file, scaler_file, output_file):
 
         # Gerar a coluna "Aposta"
         logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
-        df_features['Aposta'] = df_features['Secos']  # Copia as apostas secas inicialmente
+        df_features['Aposta'] = df_features['Seco']  # Copia as apostas secas inicialmente
 
         # Escolhendo os "duplos" para os 5 jogos mais incertos
         duplo_opcoes = ['1', 'X', '2']
+        prob_matrix = ordered_probabilities.to_numpy()
         for idx in jogos_duplos_idxs:
-            mais_provaveis = probabilities[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
+            mais_provaveis = prob_matrix[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
             df_features.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"
 
         # Salvando as predições no arquivo

@@ -53,12 +53,11 @@ def _normalize_probabilities(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _derive_market_features(df: pd.DataFrame) -> pd.DataFrame:
-    df["market_entropy"] = -(
-        df[["P(1)", "P(X)", "P(2)"]].mul(
-            df[["P(1)", "P(X)", "P(2)"]].applymap(lambda p: math.log(max(p, 1e-15)))
-        ).sum(axis=1)
-    )
-    df["pmax"] = df[["P(1)", "P(X)", "P(2)"]].max(axis=1)
+    probs = df[["P(1)", "P(X)", "P(2)"]]
+    log_probs = probs.map(lambda p: math.log(max(p, 1e-15)))
+
+    df["market_entropy"] = -(probs * log_probs).sum(axis=1)
+    df["pmax"] = probs.max(axis=1)
     df["spread_1_2"] = (df["P(1)"] - df["P(2)"]).abs()
     df["draw_bias"] = df["P(X)"]
     return df

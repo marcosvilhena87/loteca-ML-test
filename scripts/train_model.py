@@ -26,32 +26,161 @@ def _reorder_probabilities(probabilities: np.ndarray, classes: np.ndarray) -> np
     return ordered
 
 
-def _evaluate_draw_thresholds(probabilities: np.ndarray, classes: np.ndarray, y_true: pd.Series, thresholds) -> None:
+def _compute_brier_score(y_true: pd.Series, probabilities: np.ndarray, classes: np.ndarray) -> float:
+    y_true_bin = label_binarize(y_true, classes=classes)
+    return float(np.mean(np.sum((probabilities - y_true_bin) ** 2, axis=1)))
+
+
+def _create_calibrated_classifier() -> CalibratedClassifierCV:
+    base_model = RandomForestClassifier(random_state=42, n_estimators=200, max_depth=None)
+    calibrator = CalibratedClassifierCV(
+        estimator=base_model,
+        method='isotonic',
+        cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
+    )
+    return calibrator
+
+
+def _adjust_draw_probabilities(probabilities: np.ndarray, threshold: float) -> np.ndarray:
+    adjusted = probabilities.copy()
+    if adjusted[1] < threshold:
+        adjusted[1] = 0.0
+        total = adjusted.sum()
+        if total > 0:
+            adjusted = adjusted / total
+    return adjusted
+
+
+def _evaluate_draw_thresholds(probabilities: np.ndarray, classes: np.ndarray, y_true: pd.Series, thresholds):
     ordered = _reorder_probabilities(probabilities, classes)
-    best_threshold = None
-    best_accuracy = -np.inf
+    class_order = np.array(['1', 'X', '2'])
+    best_result = None
 
     for threshold in thresholds:
-        preds_idx = ordered.argmax(axis=1)
-        adjusted = []
-        for pred, prob_row in zip(preds_idx, ordered):
-            if pred == 1 and prob_row[1] < threshold:
-                fallback = 0 if prob_row[0] >= prob_row[2] else 2
-                adjusted.append(fallback)
-            else:
-                adjusted.append(pred)
-        preds = np.array(['1', 'X', '2'])[adjusted]
-        acc = accuracy_score(y_true, preds)
-        logging.info(f"Acurácia com draw_threshold={threshold:.2f}: {acc:.4f}")
-        if acc > best_accuracy:
-            best_accuracy = acc
-            best_threshold = threshold
+        adjusted_probs = np.apply_along_axis(_adjust_draw_probabilities, 1, ordered, threshold)
+        # Evita problemas numéricos ao calcular logloss
+        adjusted_probs = np.clip(adjusted_probs, 1e-15, 1 - 1e-15)
+        adjusted_probs = adjusted_probs / adjusted_probs.sum(axis=1, keepdims=True)
 
-    logging.info(
-        "Melhor draw_threshold observado: %.2f (acurácia %.4f)",
-        best_threshold,
-        best_accuracy,
-    )
+        preds_idx = adjusted_probs.argmax(axis=1)
+        preds = class_order[preds_idx]
+
+        acc = accuracy_score(y_true, preds)
+        logloss = log_loss(y_true, adjusted_probs, labels=class_order)
+        brier = _compute_brier_score(y_true, adjusted_probs, class_order)
+
+        logging.info(
+            "Threshold %.2f => Acurácia %.4f | LogLoss %.4f | Brier %.4f",
+            threshold,
+            acc,
+            logloss,
+            brier,
+        )
+
+        if best_result is None:
+            best_result = {
+                'threshold': threshold,
+                'accuracy': acc,
+                'logloss': logloss,
+                'brier': brier,
+            }
+            continue
+
+        if (logloss < best_result['logloss']) or (
+            np.isclose(logloss, best_result['logloss']) and brier < best_result['brier']
+        ):
+            best_result = {
+                'threshold': threshold,
+                'accuracy': acc,
+                'logloss': logloss,
+                'brier': brier,
+            }
+
+    if best_result:
+        logging.info(
+            "Melhor draw_threshold por LogLoss: %.2f (LogLoss %.4f | Brier %.4f | Acurácia %.4f)",
+            best_result['threshold'],
+            best_result['logloss'],
+            best_result['brier'],
+            best_result['accuracy'],
+        )
+
+    return best_result
+
+
+def temporal_backtest(df: pd.DataFrame, block_size: int = 50) -> pd.DataFrame:
+    """Executa backtest temporal em blocos de concursos ordenados."""
+
+    if 'Concurso' not in df.columns:
+        raise KeyError("Coluna 'Concurso' é necessária para o backtest temporal.")
+
+    concursos = sorted(df['Concurso'].unique())
+    if len(concursos) <= block_size:
+        logging.info(
+            "Backtest temporal não executado: são necessários pelo menos %d concursos (encontrados %d).",
+            block_size + 1,
+            len(concursos),
+        )
+        return pd.DataFrame()
+
+    resultados = []
+    class_order = np.array(['1', 'X', '2'])
+
+    for start in range(0, len(concursos) - block_size, block_size):
+        train_concursos = concursos[:start + block_size]
+        test_concursos = concursos[start + block_size: start + 2 * block_size]
+
+        if not test_concursos:
+            continue
+
+        train_df = df[df['Concurso'].isin(train_concursos)]
+        test_df = df[df['Concurso'].isin(test_concursos)]
+
+        if train_df.empty or test_df.empty:
+            continue
+
+        preprocessor = Pipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+        ])
+
+        X_train = train_df[FEATURE_COLUMNS]
+        y_train = train_df['Resultado']
+        X_test = test_df[FEATURE_COLUMNS]
+        y_test = test_df['Resultado']
+
+        X_train_processed = preprocessor.fit_transform(X_train)
+        X_test_processed = preprocessor.transform(X_test)
+
+        calibrator = _create_calibrated_classifier()
+        calibrator.fit(X_train_processed, y_train)
+
+        y_proba = calibrator.predict_proba(X_test_processed)
+        y_pred = calibrator.predict(X_test_processed)
+
+        acc = accuracy_score(y_test, y_pred)
+        logloss = log_loss(y_test, y_proba, labels=class_order)
+        brier = _compute_brier_score(y_test, y_proba, class_order)
+
+        resultado_bloco = {
+            'train_range': f"{train_concursos[0]}-{train_concursos[-1]}",
+            'test_range': f"{test_concursos[0]}-{test_concursos[-1]}",
+            'amostras_teste': len(test_df),
+            'acuracia': acc,
+            'logloss': logloss,
+            'brier': brier,
+        }
+        resultados.append(resultado_bloco)
+
+        logging.info(
+            "Backtest %s => %s | Acurácia %.4f | LogLoss %.4f | Brier %.4f",
+            resultado_bloco['train_range'],
+            resultado_bloco['test_range'],
+            acc,
+            logloss,
+            brier,
+        )
+
+    return pd.DataFrame(resultados)
 
 
 def train(input_file, model_file, scaler_file):
@@ -82,12 +211,7 @@ def train(input_file, model_file, scaler_file):
         X_test_processed = preprocessor.transform(X_test)
 
         logging.info("Treinando o modelo de floresta aleatória com calibração isotônica...")
-        base_model = RandomForestClassifier(random_state=42, n_estimators=200, max_depth=None)
-        calibrator = CalibratedClassifierCV(
-            estimator=base_model,
-            method='isotonic',
-            cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
-        )
+        calibrator = _create_calibrated_classifier()
         calibrator.fit(X_train_processed, y_train)
 
         y_proba = calibrator.predict_proba(X_test_processed)
@@ -96,8 +220,7 @@ def train(input_file, model_file, scaler_file):
         accuracy = accuracy_score(y_test, y_pred)
         logloss = log_loss(y_test, y_proba, labels=calibrator.classes_)
 
-        y_true_bin = label_binarize(y_test, classes=calibrator.classes_)
-        brier = float(np.mean(np.sum((y_proba - y_true_bin) ** 2, axis=1)))
+        brier = _compute_brier_score(y_test, y_proba, calibrator.classes_)
         brier_avg = brier / len(calibrator.classes_)
         logging.info(f"Acurácia (sanity check) no conjunto de teste: {accuracy:.4f}")
         logging.info(f"LogLoss no conjunto de teste: {logloss:.4f}")
@@ -111,6 +234,11 @@ def train(input_file, model_file, scaler_file):
             y_true=y_test,
             thresholds=[0.25, 0.30, 0.35, 0.40],
         )
+
+        logging.info("Rodando backtest temporal em blocos de 50 concursos...")
+        backtest_df = temporal_backtest(df, block_size=50)
+        if not backtest_df.empty:
+            logging.info("Resumo do backtest temporal:\n%s", backtest_df.to_string(index=False))
 
         logging.info(f"Salvando o modelo em {model_file} e o pré-processador em {scaler_file}...")
         dump(calibrator, model_file)

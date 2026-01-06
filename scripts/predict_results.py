@@ -32,6 +32,7 @@ def predict(
     input_file,
     model_file,
     output_file,
+    duplo_strategy: str = "entropy",
     historical_file: str = "data/raw/concursos_anteriores.csv",
 ):
     """Generate predictions for future games and write them to CSV.
@@ -44,6 +45,14 @@ def predict(
         Path of the trained model to load.
     output_file : str
         Destination path for the predictions CSV.
+    duplo_strategy : str
+        Strategy used to select the 5 games that will receive "duplos".
+        Supported options:
+
+        - ``"entropy"``: picks the five games with the highest entropy (default).
+        - ``"top_margin"``: picks the five games with the lowest difference between the
+          two most probable outcomes (``model_top_margin``), i.e., where the model is
+          least confident.
 
     Returns
     -------
@@ -97,8 +106,23 @@ def predict(
         df_features['Entropia'] = -np.sum(probabilities_clipped * np.log(probabilities_clipped), axis=1)
 
         # Identificar os 5 jogos mais incertos para aplicar os "duplos"
-        jogos_duplos_idxs = df_features.nlargest(5, 'Entropia').index
-        logging.info(f"Índices dos jogos mais incertos para duplos: {jogos_duplos_idxs.tolist()}")
+        if duplo_strategy not in {"entropy", "top_margin"}:
+            raise ValueError(
+                "Estrategia de duplos inválida. Use 'entropy' ou 'top_margin'."
+            )
+
+        if duplo_strategy == "entropy":
+            jogos_duplos_idxs = df_features.nlargest(5, 'Entropia').index
+            logging.info(
+                "Selecionando duplos pelos maiores valores de entropia: %s",
+                jogos_duplos_idxs.tolist(),
+            )
+        else:
+            jogos_duplos_idxs = df_features.nsmallest(5, 'model_top_margin').index
+            logging.info(
+                "Selecionando duplos pelos menores valores de model_top_margin: %s",
+                jogos_duplos_idxs.tolist(),
+            )
 
         # Gerar a coluna "Aposta"
         logging.info("Gerando a coluna de aposta com 9 secos e 5 duplos...")
@@ -111,9 +135,46 @@ def predict(
             mais_provaveis = prob_matrix[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
             df_features.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"
 
+        # Garantir que features-chave estejam presentes para auditoria
+        audit_columns = [
+            'pmax',
+            'market_entropy',
+            'history_points_diff',
+            'history_goal_diff_diff',
+            'home_last5_points',
+            'away_last5_points',
+            'is_neutro',
+            'model_top_margin',
+            'Entropia',
+        ]
+        missing_audit = [col for col in audit_columns if col not in df_features.columns]
+        if missing_audit:
+            raise KeyError(
+                f"As seguintes colunas de auditoria estão ausentes no dataset: {missing_audit}"
+            )
+
+        ordered_cols = [
+            'Concurso',
+            'Jogo',
+            'Mandante',
+            'Visitante',
+            'Aposta',
+            'Seco',
+            'Probabilidade (1)',
+            'Probabilidade (X)',
+            'Probabilidade (2)',
+        ]
+
+        audit_cols_order = [col for col in audit_columns if col in df_features.columns]
+        remaining_cols = [
+            col for col in df_features.columns if col not in ordered_cols + audit_cols_order
+        ]
+
+        final_columns = ordered_cols + audit_cols_order + remaining_cols
+
         # Salvando as predições no arquivo
         logging.info(f"Salvando predições no arquivo {output_file}...")
-        df_features.to_csv(output_file, sep=';', index=False)
+        df_features.to_csv(output_file, sep=';', index=False, columns=final_columns)
         logging.info(f"Previsões salvas com sucesso em {output_file}!")
     
     except FileNotFoundError as e:

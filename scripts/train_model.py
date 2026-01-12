@@ -41,7 +41,6 @@ def train(input_file, model_file):
         logging.info("Treinando o modelo...")
         model = LogisticRegression(
             random_state=42,
-            multi_class="multinomial",
             solver="lbfgs",
             max_iter=1000,
         )

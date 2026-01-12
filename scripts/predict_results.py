@@ -70,9 +70,11 @@ def predict(input_file, model_file, scaler_file, output_file):
 
         # Adicionando as predições ao DataFrame
         logging.info("Adicionando predições ao DataFrame...")
-        df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
-        df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
-        df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)        
+        classes = [str(cls) for cls in model.classes_]
+        cls_to_col = {cls: idx for idx, cls in enumerate(classes)}
+        df['Probabilidade (1)'] = np.round(probabilities[:, cls_to_col['1']], 5)
+        df['Probabilidade (X)'] = np.round(probabilities[:, cls_to_col['X']], 5)
+        df['Probabilidade (2)'] = np.round(probabilities[:, cls_to_col['2']], 5)
         df['Secos'] = predictions
 
         # Adicionando um valor pequeno para evitar problemas com log(0)
@@ -92,7 +94,7 @@ def predict(input_file, model_file, scaler_file, output_file):
         df['Aposta'] = df['Secos']  # Copia as apostas secas inicialmente
 
         # Escolhendo os "duplos" para os 5 jogos mais incertos
-        duplo_opcoes = ['1', 'X', '2']
+        duplo_opcoes = classes
         for idx in jogos_duplos_idxs:
             mais_provaveis = probabilities[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
             df.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"

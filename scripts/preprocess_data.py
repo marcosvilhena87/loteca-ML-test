@@ -1,4 +1,5 @@
 import logging
+import numpy as np
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO,
@@ -43,6 +44,15 @@ def process(input_file, output_file):
         df['P(X)'] /= prob_sum
         df['P(2)'] /= prob_sum
 
+        # Features derivadas simples para enriquecer o contexto
+        logging.info("Calculando features derivadas das probabilidades...")
+        eps = 1e-12
+        df['log_odds_1_2'] = np.log((df['P(1)'] + eps) / (df['P(2)'] + eps))
+        df['p1_minus_p2'] = df['P(1)'] - df['P(2)']
+        probs = df[['P(1)', 'P(X)', 'P(2)']].to_numpy()
+        sorted_probs = np.sort(probs, axis=1)
+        df['confidence_gap'] = sorted_probs[:, -1] - sorted_probs[:, -2]
+
         # Garantir a coluna 'Resultado'
         logging.info("Determinando os resultados reais dos jogos...")
         if all(col in df.columns for col in ['[1]', '[x]', '[2]']):
@@ -54,7 +64,17 @@ def process(input_file, output_file):
 
         # Remover linhas inválidas
         logging.info("Removendo linhas inválidas...")
-        df = df.dropna(subset=['Resultado', 'P(1)', 'P(X)', 'P(2)'])
+        df = df.dropna(
+            subset=[
+                'Resultado',
+                'P(1)',
+                'P(X)',
+                'P(2)',
+                'log_odds_1_2',
+                'p1_minus_p2',
+                'confidence_gap',
+            ]
+        )
 
         # Salvar o arquivo processado
         logging.info(f"Salvando o arquivo processado em {output_file}...")

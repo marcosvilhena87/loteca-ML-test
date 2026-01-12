@@ -1,6 +1,7 @@
 import logging
 import pandas as pd
 import numpy as np
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix, log_loss
 from joblib import dump  # Usando joblib para salvar os modelos
@@ -46,13 +47,21 @@ def train(input_file, model_file):
 
         # Selecionando as features (probabilidades) e o target (resultado real)
         logging.info("Selecionando as features e o target...")
-        X = df[['P(1)', 'P(X)', 'P(2)']]  # Features
+        feature_columns = [
+            'P(1)',
+            'P(X)',
+            'P(2)',
+            'log_odds_1_2',
+            'p1_minus_p2',
+            'confidence_gap',
+        ]
+        X = df[feature_columns]  # Features
         y = df['Resultado']  # Target: 1, X ou 2
 
         # Ordenar por concurso para o split temporal
         logging.info("Dividindo os dados em treino e teste (split temporal)...")
         df = df.sort_values(by=["Concurso", "Jogo"])
-        X = df[['P(1)', 'P(X)', 'P(2)']]
+        X = df[feature_columns]
         y = df['Resultado']
         X_train, X_test, y_train, y_test, train_contests = temporal_train_test_split(
             X, y, df["Concurso"], test_size=0.2
@@ -63,19 +72,79 @@ def train(input_file, model_file):
             df.loc[X_test.index, "Concurso"].min(),
         )
 
-        # Treinando o modelo
-        logging.info("Treinando o modelo...")
+        logging.info("Criando split temporal para calibração e tuning...")
+        X_train_base, X_cal, y_train_base, y_cal, cal_contests = temporal_train_test_split(
+            X_train, y_train, df.loc[X_train.index, "Concurso"], test_size=0.2
+        )
+        logging.info(
+            "Calibração: treino até concurso %s, calibração a partir de %s.",
+            cal_contests.max(),
+            df.loc[X_cal.index, "Concurso"].min(),
+        )
+
+        X_tune_train, X_tune_val, y_tune_train, y_tune_val, tune_contests = (
+            temporal_train_test_split(
+                X_train_base,
+                y_train_base,
+                df.loc[X_train_base.index, "Concurso"],
+                test_size=0.2,
+            )
+        )
+        logging.info(
+            "Tuning: treino até concurso %s, validação a partir de %s.",
+            tune_contests.max(),
+            df.loc[X_tune_val.index, "Concurso"].min(),
+        )
+
+        # Tuning do C usando validação temporal
+        logging.info("Avaliando valores de C para regularização...")
+        candidate_cs = [0.05, 0.1, 0.3, 1, 3, 10]
+        best_c = None
+        best_logloss = np.inf
+        for c_value in candidate_cs:
+            candidate_model = LogisticRegression(
+                random_state=42,
+                solver="lbfgs",
+                max_iter=1000,
+                class_weight="balanced",
+                multi_class="multinomial",
+                C=c_value,
+            )
+            candidate_model.fit(X_tune_train, y_tune_train)
+            val_probabilities = candidate_model.predict_proba(X_tune_val)
+            val_logloss = log_loss(
+                y_tune_val, val_probabilities, labels=candidate_model.classes_
+            )
+            logging.info("C=%s -> LogLoss validação: %.4f", c_value, val_logloss)
+            if val_logloss < best_logloss:
+                best_logloss = val_logloss
+                best_c = c_value
+
+        logging.info("Melhor C selecionado: %s", best_c)
+
+        # Treinando o modelo base
+        logging.info("Treinando o modelo base com C=%s...", best_c)
         model = LogisticRegression(
             random_state=42,
             solver="lbfgs",
             max_iter=1000,
+            class_weight="balanced",
+            multi_class="multinomial",
+            C=best_c,
         )
-        model.fit(X_train, y_train)
+        model.fit(X_train_base, y_train_base)
+
+        # Calibração explícita com bloco temporal intermediário
+        logging.info("Calibrando o modelo (isotonic)...")
+        calibrated_model = CalibratedClassifierCV(
+            model, method="isotonic", cv="prefit"
+        )
+        calibrated_model.fit(X_cal, y_cal)
 
         # Avaliando o modelo
-        probabilities = model.predict_proba(X_test)
-        predictions = model.predict(X_test)
-        classes = model.classes_
+        probabilities = calibrated_model.predict_proba(X_test)
+        predictions = calibrated_model.predict(X_test)
+        classes = calibrated_model.classes_
         accuracy = accuracy_score(y_test, predictions)
         logloss = log_loss(y_test, probabilities, labels=classes)
         y_true = (
@@ -86,7 +155,7 @@ def train(input_file, model_file):
         brier_score = np.mean(np.sum((probabilities - y_true) ** 2, axis=1))
 
         # Baseline usando probabilidades do mercado
-        baseline_probabilities = X_test.to_numpy()
+        baseline_probabilities = X_test[['P(1)', 'P(X)', 'P(2)']].to_numpy()
         baseline_logloss = log_loss(y_test, baseline_probabilities, labels=classes)
         baseline_brier = np.mean(np.sum((baseline_probabilities - y_true) ** 2, axis=1))
         conf_matrix = confusion_matrix(y_test, predictions, labels=classes)
@@ -105,7 +174,7 @@ def train(input_file, model_file):
 
         # Salvando o modelo
         logging.info(f"Salvando o modelo em {model_file}...")
-        dump(model, model_file)
+        dump(calibrated_model, model_file)
 
         logging.info("Treinamento concluído com sucesso!")
     

@@ -200,40 +200,61 @@ def train(input_file, model_file):
         )
         log_block_distribution("tuning", y_tune_val)
 
-        # Tuning do C usando validação temporal
+        # Tuning do C e class_weight usando validação temporal
         logging.info("Avaliando valores de C para regularização...")
         candidate_cs = [0.05, 0.1, 0.3, 1, 3, 10]
-        class_weight = {"1": 1.0, "X": 1.4, "2": 1.1}
         best_c = None
+        best_class_weight = None
         best_logloss = np.inf
-        for c_value in candidate_cs:
-            candidate_model = LogisticRegression(
-                random_state=42,
-                solver="lbfgs",
-                max_iter=1000,
-                C=c_value,
-                class_weight=class_weight,
-            )
-            candidate_model.fit(X_tune_train, y_tune_train)
-            val_probabilities = candidate_model.predict_proba(X_tune_val)
-            val_logloss = log_loss(
-                y_tune_val, val_probabilities, labels=candidate_model.classes_
-            )
-            logging.info("C=%s -> LogLoss validação: %.4f", c_value, val_logloss)
-            if val_logloss < best_logloss:
-                best_logloss = val_logloss
-                best_c = c_value
+        candidate_class_weights = [
+            None,
+            {"1": 1.0, "X": 1.4, "2": 1.1},
+        ]
+        for class_weight in candidate_class_weights:
+            for c_value in candidate_cs:
+                candidate_model = LogisticRegression(
+                    random_state=42,
+                    solver="lbfgs",
+                    max_iter=1000,
+                    C=c_value,
+                    class_weight=class_weight,
+                    multi_class="multinomial",
+                )
+                candidate_model.fit(X_tune_train, y_tune_train)
+                val_probabilities = candidate_model.predict_proba(X_tune_val)
+                val_logloss = log_loss(
+                    y_tune_val, val_probabilities, labels=candidate_model.classes_
+                )
+                logging.info(
+                    "class_weight=%s C=%s -> LogLoss validação: %.4f",
+                    class_weight,
+                    c_value,
+                    val_logloss,
+                )
+                if val_logloss < best_logloss:
+                    best_logloss = val_logloss
+                    best_c = c_value
+                    best_class_weight = class_weight
 
-        logging.info("Melhor C selecionado: %s", best_c)
+        logging.info(
+            "Melhores parâmetros selecionados: C=%s class_weight=%s",
+            best_c,
+            best_class_weight,
+        )
 
         # Treinando o modelo base
-        logging.info("Treinando o modelo base com C=%s...", best_c)
+        logging.info(
+            "Treinando o modelo base com C=%s e class_weight=%s...",
+            best_c,
+            best_class_weight,
+        )
         model = LogisticRegression(
             random_state=42,
             solver="lbfgs",
             max_iter=1000,
             C=best_c,
-            class_weight=class_weight,
+            class_weight=best_class_weight,
+            multi_class="multinomial",
         )
         model.fit(X_train_base, y_train_base)
 

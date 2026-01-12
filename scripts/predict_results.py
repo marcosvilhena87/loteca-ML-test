@@ -60,10 +60,18 @@ def predict(input_file, model_file, output_file):
         logging.info("Calculando features derivadas para compatibilidade com o modelo...")
         eps = 1e-12
         df['log_odds_1_2'] = np.log((df['P(1)'] + eps) / (df['P(2)'] + eps))
+        df['log_odds_1_X'] = np.log((df['P(1)'] + eps) / (df['P(X)'] + eps))
+        df['log_odds_X_2'] = np.log((df['P(X)'] + eps) / (df['P(2)'] + eps))
         df['p1_minus_p2'] = df['P(1)'] - df['P(2)']
+        df['pX_minus_max'] = df['P(X)'] - df[['P(1)', 'P(2)']].max(axis=1)
+        df['fav_strength'] = df[['P(1)', 'P(2)']].max(axis=1) - df[['P(1)', 'P(2)']].min(axis=1)
         probs = df[required_columns].to_numpy()
         sorted_probs = np.sort(probs, axis=1)
         df['confidence_gap'] = sorted_probs[:, -1] - sorted_probs[:, -2]
+        df['entropy_market'] = -np.sum(
+            probs * np.log(probs + eps),
+            axis=1,
+        )
         
         # Carregando o modelo
         logging.info("Carregando modelo...")
@@ -76,8 +84,13 @@ def predict(input_file, model_file, output_file):
             'P(X)',
             'P(2)',
             'log_odds_1_2',
+            'log_odds_1_X',
+            'log_odds_X_2',
             'p1_minus_p2',
+            'pX_minus_max',
+            'fav_strength',
             'confidence_gap',
+            'entropy_market',
         ]
         X_future = df[feature_columns]
 

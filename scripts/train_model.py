@@ -19,6 +19,33 @@ def log_block_distribution(block_name, target_values):
     )
     logging.info("Percentual de '2' em %s: %.2f%%", block_name, pct_2)
 
+
+def log_prediction_diagnostics(stage_name, probabilities, predictions, classes):
+    if "2" not in classes:
+        logging.warning("Classe '2' não encontrada em %s.", stage_name)
+        return
+    class_index = list(classes).index("2")
+    p2_values = probabilities[:, class_index]
+    mean_p2 = float(np.mean(p2_values))
+    median_p2 = float(np.median(p2_values))
+    argmax_classes = classes[np.argmax(probabilities, axis=1)]
+    argmax_pct = (argmax_classes == "2").mean() * 100
+    prediction_counts = pd.Series(predictions).value_counts().to_dict()
+    logging.info(
+        "Diagnóstico %s: P(2) média=%.6f mediana=%.6f",
+        stage_name,
+        mean_p2,
+        median_p2,
+    )
+    logging.info(
+        "Diagnóstico %s: %% argmax=2 -> %.2f%%", stage_name, argmax_pct
+    )
+    logging.info(
+        "Diagnóstico %s: contagem de previsões %s",
+        stage_name,
+        prediction_counts,
+    )
+
 def temporal_train_test_split(features, target, contest_series, test_size=0.2):
     contests = pd.Series(contest_series).dropna().astype(int)
     if contests.empty:
@@ -154,9 +181,23 @@ def train(input_file, model_file):
         calibrated_model.fit(X_cal, y_cal)
 
         # Avaliando o modelo
+        base_probabilities = model.predict_proba(X_test)
+        base_predictions = model.predict(X_test)
         probabilities = calibrated_model.predict_proba(X_test)
         predictions = calibrated_model.predict(X_test)
         classes = calibrated_model.classes_
+        log_prediction_diagnostics(
+            "base (sem calibração)",
+            base_probabilities,
+            base_predictions,
+            model.classes_,
+        )
+        log_prediction_diagnostics(
+            "calibrado",
+            probabilities,
+            predictions,
+            classes,
+        )
         accuracy = accuracy_score(y_test, predictions)
         logloss = log_loss(y_test, probabilities, labels=classes)
         y_true = (

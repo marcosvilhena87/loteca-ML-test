@@ -152,12 +152,14 @@ def train(input_file, model_file):
             .reindex(columns=classes, fill_value=0)
             .to_numpy()
         )
-        brier_score = np.mean(np.sum((probabilities - y_true) ** 2, axis=1))
+        brier_score = np.mean(np.sum((probabilities - y_true) ** 2, axis=1)) / 2
 
         # Baseline usando probabilidades do mercado
         baseline_probabilities = X_test[['P(1)', 'P(X)', 'P(2)']].to_numpy()
         baseline_logloss = log_loss(y_test, baseline_probabilities, labels=classes)
-        baseline_brier = np.mean(np.sum((baseline_probabilities - y_true) ** 2, axis=1))
+        baseline_brier = (
+            np.mean(np.sum((baseline_probabilities - y_true) ** 2, axis=1)) / 2
+        )
         conf_matrix = confusion_matrix(y_test, predictions, labels=classes)
         logging.info(f"Acurácia no conjunto de teste: {accuracy:.4f}")
         logging.info(f"Log loss no conjunto de teste: {logloss:.4f}")

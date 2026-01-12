@@ -218,7 +218,6 @@ def train(input_file, model_file):
                     max_iter=1000,
                     C=c_value,
                     class_weight=class_weight,
-                    multi_class="multinomial",
                 )
                 candidate_model.fit(X_tune_train, y_tune_train)
                 val_probabilities = candidate_model.predict_proba(X_tune_val)
@@ -254,7 +253,6 @@ def train(input_file, model_file):
             max_iter=1000,
             C=best_c,
             class_weight=best_class_weight,
-            multi_class="multinomial",
         )
         model.fit(X_train_base, y_train_base)
 

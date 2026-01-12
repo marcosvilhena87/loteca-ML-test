@@ -2,6 +2,7 @@ import logging
 import pandas as pd
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.frozen import FrozenEstimator
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix, log_loss
 from joblib import dump  # Usando joblib para salvar os modelos
@@ -107,7 +108,6 @@ def train(input_file, model_file):
                 solver="lbfgs",
                 max_iter=1000,
                 class_weight="balanced",
-                multi_class="multinomial",
                 C=c_value,
             )
             candidate_model.fit(X_tune_train, y_tune_train)
@@ -129,7 +129,6 @@ def train(input_file, model_file):
             solver="lbfgs",
             max_iter=1000,
             class_weight="balanced",
-            multi_class="multinomial",
             C=best_c,
         )
         model.fit(X_train_base, y_train_base)
@@ -137,7 +136,7 @@ def train(input_file, model_file):
         # Calibração explícita com bloco temporal intermediário
         logging.info("Calibrando o modelo (isotonic)...")
         calibrated_model = CalibratedClassifierCV(
-            model, method="isotonic", cv="prefit"
+            FrozenEstimator(model), method="isotonic"
         )
         calibrated_model.fit(X_cal, y_cal)
 

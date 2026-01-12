@@ -33,7 +33,10 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
             f"{missing_columns}"
         )
 
-    df["is_neutro"] = (df["Mando"].str.lower() == "neutro").astype(int)
+    for column in ["P(1)", "P(X)", "P(2)", "Home_Last5_Home", "Away_Last5_Away"]:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    df["is_neutro"] = (df["Mando"].fillna("").astype(str).str.lower() == "neutro").astype(int)
     df["last5_diff"] = df["Home_Last5_Home"] - df["Away_Last5_Away"]
     df["last5_sum"] = df["Home_Last5_Home"] + df["Away_Last5_Away"]
 

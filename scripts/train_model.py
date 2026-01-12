@@ -2,7 +2,7 @@ import logging
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix, log_loss
 from joblib import dump  # Usando joblib para salvar os modelos
 
@@ -39,7 +39,12 @@ def train(input_file, model_file):
 
         # Treinando o modelo
         logging.info("Treinando o modelo...")
-        model = RandomForestClassifier(random_state=42, n_estimators=500, n_jobs=-1, max_depth=None)
+        model = LogisticRegression(
+            random_state=42,
+            multi_class="multinomial",
+            solver="lbfgs",
+            max_iter=1000,
+        )
         model.fit(X_train, y_train)
 
         # Avaliando o modelo

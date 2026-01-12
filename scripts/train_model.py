@@ -112,6 +112,7 @@ def train(input_file, model_file):
         # Tuning do C usando validação temporal
         logging.info("Avaliando valores de C para regularização...")
         candidate_cs = [0.05, 0.1, 0.3, 1, 3, 10]
+        class_weight = {"1": 1.0, "X": 1.4, "2": 1.1}
         best_c = None
         best_logloss = np.inf
         for c_value in candidate_cs:
@@ -120,6 +121,7 @@ def train(input_file, model_file):
                 solver="lbfgs",
                 max_iter=1000,
                 C=c_value,
+                class_weight=class_weight,
             )
             candidate_model.fit(X_tune_train, y_tune_train)
             val_probabilities = candidate_model.predict_proba(X_tune_val)
@@ -140,6 +142,7 @@ def train(input_file, model_file):
             solver="lbfgs",
             max_iter=1000,
             C=best_c,
+            class_weight=class_weight,
         )
         model.fit(X_train_base, y_train_base)
 

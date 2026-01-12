@@ -50,6 +50,20 @@ def predict(input_file, model_file, output_file):
 
         # Reconfirmando que as colunas de probabilidade agora estão presentes
         required_columns = ['P(1)', 'P(X)', 'P(2)']
+        missing_prob_columns = [col for col in required_columns if col not in df.columns]
+        if missing_prob_columns:
+            raise ValueError(
+                f"As colunas de probabilidade {missing_prob_columns} são necessárias no arquivo {input_file}."
+            )
+
+        # Garantir features derivadas iguais às usadas no treino
+        logging.info("Calculando features derivadas para compatibilidade com o modelo...")
+        eps = 1e-12
+        df['log_odds_1_2'] = np.log((df['P(1)'] + eps) / (df['P(2)'] + eps))
+        df['p1_minus_p2'] = df['P(1)'] - df['P(2)']
+        probs = df[required_columns].to_numpy()
+        sorted_probs = np.sort(probs, axis=1)
+        df['confidence_gap'] = sorted_probs[:, -1] - sorted_probs[:, -2]
         
         # Carregando o modelo
         logging.info("Carregando modelo...")
@@ -57,7 +71,15 @@ def predict(input_file, model_file, output_file):
 
         # Selecionando as features para predição
         logging.info("Preparando dados para predição...")
-        X_future = df[required_columns]
+        feature_columns = [
+            'P(1)',
+            'P(X)',
+            'P(2)',
+            'log_odds_1_2',
+            'p1_minus_p2',
+            'confidence_gap',
+        ]
+        X_future = df[feature_columns]
 
         # Gerando as predições
         logging.info("Gerando predições...")

@@ -10,6 +10,15 @@ from joblib import dump  # Usando joblib para salvar os modelos
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
+
+def log_block_distribution(block_name, target_values):
+    counts = target_values.value_counts()
+    pct_2 = (target_values.astype(str) == "2").mean() * 100
+    logging.info(
+        "Distribuição de Resultado (%s): %s", block_name, counts.to_dict()
+    )
+    logging.info("Percentual de '2' em %s: %.2f%%", block_name, pct_2)
+
 def temporal_train_test_split(features, target, contest_series, test_size=0.2):
     contests = pd.Series(contest_series).dropna().astype(int)
     if contests.empty:
@@ -72,6 +81,7 @@ def train(input_file, model_file):
             train_contests.max(),
             df.loc[X_test.index, "Concurso"].min(),
         )
+        log_block_distribution("teste", y_test)
 
         logging.info("Criando split temporal para calibração e tuning...")
         X_train_base, X_cal, y_train_base, y_cal, cal_contests = temporal_train_test_split(
@@ -82,6 +92,7 @@ def train(input_file, model_file):
             cal_contests.max(),
             df.loc[X_cal.index, "Concurso"].min(),
         )
+        log_block_distribution("calibracao", y_cal)
 
         X_tune_train, X_tune_val, y_tune_train, y_tune_val, tune_contests = (
             temporal_train_test_split(
@@ -96,6 +107,7 @@ def train(input_file, model_file):
             tune_contests.max(),
             df.loc[X_tune_val.index, "Concurso"].min(),
         )
+        log_block_distribution("tuning", y_tune_val)
 
         # Tuning do C usando validação temporal
         logging.info("Avaliando valores de C para regularização...")

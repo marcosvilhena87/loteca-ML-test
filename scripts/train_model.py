@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import confusion_matrix, log_loss
+from sklearn.metrics import accuracy_score, confusion_matrix, log_loss
 from joblib import dump  # Usando joblib para salvar os modelos
 
 logging.basicConfig(level=logging.INFO,
@@ -46,6 +46,7 @@ def train(input_file, model_file):
         probabilities = model.predict_proba(X_test)
         predictions = model.predict(X_test)
         classes = model.classes_
+        accuracy = accuracy_score(y_test, predictions)
         logloss = log_loss(y_test, probabilities, labels=classes)
         y_true = (
             pd.get_dummies(y_test)
@@ -54,6 +55,7 @@ def train(input_file, model_file):
         )
         brier_score = np.mean(np.sum((probabilities - y_true) ** 2, axis=1))
         conf_matrix = confusion_matrix(y_test, predictions, labels=classes)
+        logging.info(f"Acurácia no conjunto de teste: {accuracy:.4f}")
         logging.info(f"Log loss no conjunto de teste: {logloss:.4f}")
         logging.info(f"Brier score no conjunto de teste: {brier_score:.4f}")
         logging.info("Matriz de confusão no conjunto de teste:")

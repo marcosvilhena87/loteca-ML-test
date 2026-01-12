@@ -68,16 +68,24 @@ def predict(input_file, model_file, scaler_file, output_file):
         probabilities = model.predict_proba(X_future_scaled)
         predictions = model.predict(X_future_scaled)
 
+        classes = list(model.classes_)
+        proba_df = pd.DataFrame(probabilities, columns=classes, index=df.index)
+        for c in ['1', 'X', '2']:
+            if c not in proba_df.columns:
+                proba_df[c] = 0.0
+        proba_df = proba_df[['1', 'X', '2']]
+        ordered_probabilities = proba_df.to_numpy()
+
         # Adicionando as predições ao DataFrame
         logging.info("Adicionando predições ao DataFrame...")
-        df['Probabilidade (1)'] = np.round(probabilities[:, 0], 5)
-        df['Probabilidade (X)'] = np.round(probabilities[:, 1], 5)
-        df['Probabilidade (2)'] = np.round(probabilities[:, 2], 5)        
+        df['Probabilidade (1)'] = np.round(proba_df['1'], 5)
+        df['Probabilidade (X)'] = np.round(proba_df['X'], 5)
+        df['Probabilidade (2)'] = np.round(proba_df['2'], 5)
         df['Secos'] = predictions
 
         # Adicionando um valor pequeno para evitar problemas com log(0)
         epsilon = 1e-10
-        adjusted_probabilities = probabilities + epsilon
+        adjusted_probabilities = ordered_probabilities + epsilon
 
         # Calculando a entropia com as probabilidades ajustadas
         logging.info("Calculando entropia para determinar os jogos mais incertos...")
@@ -94,7 +102,7 @@ def predict(input_file, model_file, scaler_file, output_file):
         # Escolhendo os "duplos" para os 5 jogos mais incertos
         duplo_opcoes = ['1', 'X', '2']
         for idx in jogos_duplos_idxs:
-            mais_provaveis = probabilities[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
+            mais_provaveis = ordered_probabilities[idx].argsort()[-2:][::-1]  # Duas maiores probabilidades
             df.loc[idx, 'Aposta'] = f"{duplo_opcoes[mais_provaveis[0]]}, {duplo_opcoes[mais_provaveis[1]]}"
 
         # Salvando as predições no arquivo

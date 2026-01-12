@@ -3,10 +3,11 @@ import pandas as pd
 import numpy as np
 from joblib import load  # Para carregar os modelos previamente treinados
 
+from scripts.feature_engineering import FEATURE_COLUMNS, build_features
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
-def predict(input_file, model_file, scaler_file, output_file):
+def predict(input_file, model_file, output_file):
     """Generate predictions for future games and write them to CSV.
 
     Parameters
@@ -15,8 +16,6 @@ def predict(input_file, model_file, scaler_file, output_file):
         CSV file with upcoming games and odds or probabilities.
     model_file : str
         Path of the trained model to load.
-    scaler_file : str
-        Path of the scaler used during training.
     output_file : str
         Destination path for the predictions CSV.
 
@@ -50,23 +49,21 @@ def predict(input_file, model_file, scaler_file, output_file):
                     f"As colunas de odds {odds_cols} são necessárias para calcular as probabilidades no arquivo {input_file}."
                 )
 
-        # Reconfirmando que as colunas de probabilidade agora estão presentes
-        required_columns = ['P(1)', 'P(X)', 'P(2)']
-        
-        # Carregando o modelo e o scaler
-        logging.info("Carregando modelo e scaler...")
+        logging.info("Gerando features...")
+        df = build_features(df)
+
+        # Carregando o modelo
+        logging.info("Carregando modelo...")
         model = load(model_file)
-        scaler = load(scaler_file)
 
         # Selecionando as features para predição e escalando
         logging.info("Preparando dados para predição...")
-        X_future = df[required_columns]
-        X_future_scaled = scaler.transform(X_future)
+        X_future = df[FEATURE_COLUMNS]
 
         # Gerando as predições
         logging.info("Gerando predições...")
-        probabilities = model.predict_proba(X_future_scaled)
-        predictions = model.predict(X_future_scaled)
+        probabilities = model.predict_proba(X_future)
+        predictions = model.predict(X_future)
 
         # Adicionando as predições ao DataFrame
         logging.info("Adicionando predições ao DataFrame...")

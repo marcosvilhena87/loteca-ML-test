@@ -1,6 +1,8 @@
 import logging
 import pandas as pd
 
+from scripts.feature_engineering import build_features
+
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -51,6 +53,13 @@ def process(input_file, output_file):
                                                    '2' if row['[2]'] == 1 else None, axis=1)
         else:
             raise KeyError("As colunas '[1]', '[x]' e '[2]' são necessárias para calcular o resultado.")
+
+        logging.info("Gerando features...")
+        df = build_features(df)
+
+        df["is_draw"] = (df["Resultado"] == "X").astype(int)
+        df["is_home_win"] = (df["Resultado"] == "1").astype(int)
+        df["is_away_win"] = (df["Resultado"] == "2").astype(int)
 
         # Remover linhas inválidas
         logging.info("Removendo linhas inválidas...")

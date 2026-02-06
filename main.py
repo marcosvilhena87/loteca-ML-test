@@ -43,14 +43,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delta", type=float, default=0.3)
     parser.add_argument("--lambda_p14", type=float, default=1.0)
     parser.add_argument("--mu_pop", type=float, default=0.2)
-    parser.add_argument("--d_target", type=float, default=0.73)
-    parser.add_argument("--d_target_weight", type=float, default=0.5)
+    parser.add_argument("--d_target", type=float, default=0.65)
+    parser.add_argument("--d_target_weight", type=float, default=0.6)
     parser.add_argument("--contrarian_max", type=int, default=2)
     parser.add_argument("--contrarian_margin_max", type=float, default=0.05)
-    parser.add_argument("--contrarian_gain_min", type=float, default=0.1)
+    parser.add_argument("--contrarian_gain_min", type=float, default=0.05)
     parser.add_argument("--contrarian_fav_bonus", type=float, default=0.15)
     parser.add_argument("--favorite_threshold", type=float, default=0.62)
     parser.add_argument("--favorite_alt_min", type=float, default=0.22)
+    parser.add_argument("--double12_px_threshold", type=float, default=0.28)
+    parser.add_argument("--double12_penalty_weight", type=float, default=0.4)
+    parser.add_argument("--favorite_duplo_penalty_weight", type=float, default=0.25)
+    parser.add_argument("--favorite_heavy_penalty_weight", type=float, default=0.3)
     parser.add_argument("--mix_weight", type=float, default=0.2)
     parser.add_argument("--mix_clip", type=float, default=0.03)
     parser.add_argument("--validation_split", type=float, default=0.2)
@@ -151,6 +155,10 @@ def main() -> None:
         contrarian_fav_bonus=args.contrarian_fav_bonus,
         favorite_threshold=args.favorite_threshold,
         favorite_alt_min=args.favorite_alt_min,
+        double12_px_threshold=args.double12_px_threshold,
+        double12_penalty_weight=args.double12_penalty_weight,
+        favorite_duplo_penalty_weight=args.favorite_duplo_penalty_weight,
+        favorite_heavy_penalty_weight=args.favorite_heavy_penalty_weight,
     )
 
     logger.info("Ticket summary: %s", json.dumps(summary, ensure_ascii=False))
@@ -255,6 +263,14 @@ def main() -> None:
                 row["is_contrarian"],
                 row["palpite"],
             )
+    if not ticket_df.empty:
+        sum_px_delta = float(ticket_df["px_delta"].sum())
+        mean_px_delta = float(ticket_df["px_delta"].mean())
+        logger.info(
+            "Delta X agregado | sum_px_delta=%.4f mean_px_delta=%.4f",
+            sum_px_delta,
+            mean_px_delta,
+        )
 
     audit_cols = [
         "Concurso",

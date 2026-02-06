@@ -40,8 +40,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=0.6)
     parser.add_argument("--beta", type=float, default=0.3)
     parser.add_argument("--gamma", type=float, default=0.5)
-    parser.add_argument("--diversity_margin_min", type=float, default=0.05)
-    parser.add_argument("--diversity_entropy_min", type=float, default=0.05)
+    parser.add_argument("--delta", type=float, default=0.3)
+    parser.add_argument("--lambda_p14", type=float, default=0.5)
+    parser.add_argument("--mu_pop", type=float, default=0.2)
+    parser.add_argument("--contrarian_max", type=int, default=2)
+    parser.add_argument("--contrarian_margin_max", type=float, default=0.05)
+    parser.add_argument("--favorite_threshold", type=float, default=0.62)
+    parser.add_argument("--favorite_alt_min", type=float, default=0.22)
+    parser.add_argument("--mix_weight", type=float, default=0.2)
+    parser.add_argument("--mix_clip", type=float, default=0.03)
     parser.add_argument("--validation_split", type=float, default=0.2)
     return parser.parse_args()
 
@@ -116,15 +123,26 @@ def main() -> None:
     upcoming_df, _, upcoming_stats = preprocess_dataset(args.upcoming, upcoming=True)
     log_dataset_stats(logger, upcoming_stats, upcoming_df)
 
-    upcoming_df = predict_probabilities(upcoming_df, model, feature_cols)
+    upcoming_df = predict_probabilities(
+        upcoming_df,
+        model,
+        feature_cols,
+        mix_weight=args.mix_weight,
+        mix_clip=args.mix_clip,
+    )
     upcoming_df = upcoming_df.sort_values(["Concurso", "Jogo"]).reset_index(drop=True)
     ticket_df, summary = select_ticket(
         upcoming_df,
         alpha=args.alpha,
         beta=args.beta,
         gamma=args.gamma,
-        diversity_margin_min=args.diversity_margin_min,
-        diversity_entropy_min=args.diversity_entropy_min,
+        delta=args.delta,
+        lambda_p14=args.lambda_p14,
+        mu_pop=args.mu_pop,
+        contrarian_max=args.contrarian_max,
+        contrarian_margin_max=args.contrarian_margin_max,
+        favorite_threshold=args.favorite_threshold,
+        favorite_alt_min=args.favorite_alt_min,
     )
 
     logger.info("Ticket summary: %s", json.dumps(summary, ensure_ascii=False))
@@ -187,6 +205,24 @@ def main() -> None:
         entropy_secos,
         entropy_duplos,
     )
+    top_pairs = summary.get("top_pairs") or []
+    if top_pairs:
+        logger.info("Top-10 pares de duplos (rank por score_ticket):")
+        for rank, row in enumerate(top_pairs, start=1):
+            logger.info(
+                "Rank %s | Jogos %s/%s | d1=%.4f d2=%.4f g13=%.4f P13=%.6f P14=%.6f "
+                "pop=%.4f score_ticket=%.4f",
+                rank,
+                row["jogo_a"],
+                row["jogo_b"],
+                row["d1"],
+                row["d2"],
+                row["g13_component"],
+                row["p13"],
+                row["p14"],
+                row["pop_score"],
+                row["score_ticket"],
+            )
 
     audit_cols = [
         "Concurso",
@@ -196,12 +232,19 @@ def main() -> None:
         "p1",
         "px",
         "p2",
+        "p1_delta",
+        "px_delta",
+        "p2_delta",
         "top1",
         "top2",
         "margem",
         "entropy_pred",
+        "d_duplo",
+        "p3_duplo",
         "score_duplo",
         "tipo",
+        "seco_choice",
+        "p_seco_choice",
     ]
 
     audit_path = os.path.join(run_dir, "auditoria_proximo_concurso.csv")
@@ -218,6 +261,8 @@ def main() -> None:
         "top2",
         "margem",
         "entropy_pred",
+        "d_duplo",
+        "p3_duplo",
         "score_duplo",
     ]
 

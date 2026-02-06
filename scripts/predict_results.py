@@ -6,12 +6,29 @@ import numpy as np
 import pandas as pd
 
 
-def predict_probabilities(df: pd.DataFrame, model, feature_cols: List[str]) -> pd.DataFrame:
+def predict_probabilities(
+    df: pd.DataFrame,
+    model,
+    feature_cols: List[str],
+    mix_weight: float,
+    mix_clip: float,
+) -> pd.DataFrame:
     probs = model.predict_proba(df[feature_cols].to_numpy())
     df = df.copy()
     df["p1_model"] = probs[:, 0]
     df["px_model"] = probs[:, 1]
     df["p2_model"] = probs[:, 2]
+    for label in ["1", "x", "2"]:
+        market_col = f"p{label}_market"
+        model_col = f"p{label}_model"
+        blended = (1 - mix_weight) * df[market_col] + mix_weight * df[model_col]
+        delta = (blended - df[market_col]).clip(lower=-mix_clip, upper=mix_clip)
+        df[f"p{label}_delta"] = delta
+        df[f"p{label}"] = df[market_col] + delta
+    total = df[["p1", "px", "p2"]].sum(axis=1)
+    df["p1"] = df["p1"] / total
+    df["px"] = df["px"] / total
+    df["p2"] = df["p2"] / total
     return df
 
 
@@ -29,6 +46,7 @@ def score_duplos(
     alpha: float,
     beta: float,
     gamma: float,
+    delta: float,
 ) -> pd.DataFrame:
     df = df.copy()
     probs = df[["p1", "px", "p2"]].to_numpy()
@@ -45,13 +63,17 @@ def score_duplos(
     df["entropy_pred"] = [
         _entropy_row(p1, px, p2) for p1, px, p2 in probs
     ]
+    df["d_duplo"] = df["p_top1"] + df["p_top2"]
+    df["p3_duplo"] = 1 - df["d_duplo"]
+    df["popularidade_duplo"] = df["p_top1"].apply(lambda val: max(val, 1e-9))
 
     overround_penalty = (df["overround"] - 1).clip(lower=0)
     df["score_duplo"] = (
-        df["p_top2"]
-        * (1 + alpha * df["entropy_pred"])
-        * (1 - beta * overround_penalty)
-        * (1 + gamma * (1 - df["margem"]))
+        alpha * df["d_duplo"]
+        + beta * df["entropy_pred"]
+        + gamma * df["p3_duplo"]
+        - delta * np.log(df["popularidade_duplo"])
+        - overround_penalty
     )
 
     return df
@@ -67,11 +89,16 @@ def select_ticket(
     alpha: float,
     beta: float,
     gamma: float,
+    delta: float,
+    lambda_p14: float,
+    mu_pop: float,
+    contrarian_max: int,
+    contrarian_margin_max: float,
+    favorite_threshold: float,
+    favorite_alt_min: float,
     max_favorite: float = 0.75,
-    diversity_entropy_min: float = 0.05,
-    diversity_margin_min: float = 0.05,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    df = score_duplos(df, alpha=alpha, beta=beta, gamma=gamma)
+    df = score_duplos(df, alpha=alpha, beta=beta, gamma=gamma, delta=delta)
     logger = logging.getLogger("loteca")
 
     candidates = df[df["p_top1"] < max_favorite].copy()
@@ -97,48 +124,162 @@ def select_ticket(
                 "score_duplo": float(row["score_duplo"]),
             }
         )
-    selected = []
-    if not candidates.empty:
-        selected.append(candidates.index[0])
-        for idx in candidates.index[1:]:
-            if len(selected) >= 2:
-                break
-            entropy_diff = abs(df.loc[idx, "entropy_pred"] - df.loc[selected[0], "entropy_pred"])
-            margin_diff = abs(df.loc[idx, "margem"] - df.loc[selected[0], "margem"])
-            if entropy_diff > diversity_entropy_min or margin_diff > diversity_margin_min:
-                selected.append(idx)
-            else:
-                logger.info(
-                    "Reject Jogo %s: entropy_diff=%.4f, margin_diff=%.4f (thresholds %.2f/%.2f)",
-                    int(df.loc[idx, "Jogo"]),
-                    entropy_diff,
-                    margin_diff,
-                    diversity_entropy_min,
-                    diversity_margin_min,
+    selected: List[int] = []
+    pair_scores: List[Dict[str, float]] = []
+    if len(candidates) >= 2:
+        candidate_indices = candidates.index.to_list()
+        for i, idx_a in enumerate(candidate_indices[:-1]):
+            for idx_b in candidate_indices[i + 1 :]:
+                duplo_indices = [idx_a, idx_b]
+                ticket_df, metrics = _build_ticket(
+                    df,
+                    duplo_indices=duplo_indices,
+                    contrarian_max=contrarian_max,
+                    contrarian_margin_max=contrarian_margin_max,
+                    favorite_threshold=favorite_threshold,
+                    favorite_alt_min=favorite_alt_min,
                 )
-        if len(selected) < 2:
-            for idx in candidates.index:
-                if idx not in selected:
-                    selected.append(idx)
-                if len(selected) >= 2:
-                    break
+                log_p13 = metrics["log_p13"]
+                log_p14 = metrics["log_p14"]
+                pop_score = metrics["pop_score"]
+                score_ticket = log_p13 - lambda_p14 * log_p14 - mu_pop * pop_score
+                pair_scores.append(
+                    {
+                        "idx_a": int(idx_a),
+                        "idx_b": int(idx_b),
+                        "jogo_a": int(df.loc[idx_a, "Jogo"]),
+                        "jogo_b": int(df.loc[idx_b, "Jogo"]),
+                        "d1": float(df.loc[idx_a, "d_duplo"]),
+                        "d2": float(df.loc[idx_b, "d_duplo"]),
+                        "g13_component": float(metrics["g13_component"]),
+                        "p13": float(metrics["p13"]),
+                        "p14": float(metrics["p14"]),
+                        "pop_score": float(pop_score),
+                        "score_ticket": float(score_ticket),
+                    }
+                )
+        if pair_scores:
+            pair_scores_sorted = sorted(pair_scores, key=lambda row: row["score_ticket"], reverse=True)
+            best = pair_scores_sorted[0]
+            selected = [best["idx_a"], best["idx_b"]]
+            top_pairs = pair_scores_sorted[:10]
+        else:
+            top_pairs = []
+    else:
+        top_pairs = []
 
-    df["tipo"] = "SECO"
-    df.loc[selected, "tipo"] = "DUPLO"
-    df["palpite"] = df.apply(
-        lambda row: _format_double(row["top1"], row["top2"])
-        if row["tipo"] == "DUPLO"
-        else row["top1"],
-        axis=1,
-    )
+    if selected:
+        ticket_df, metrics = _build_ticket(
+            df,
+            duplo_indices=selected,
+            contrarian_max=contrarian_max,
+            contrarian_margin_max=contrarian_margin_max,
+            favorite_threshold=favorite_threshold,
+            favorite_alt_min=favorite_alt_min,
+        )
+    else:
+        ticket_df = df.copy()
+        metrics = _build_ticket_metrics(ticket_df, duplo_indices=[])
 
     summary = {
-        "duplos": int((df["tipo"] == "DUPLO").sum()),
-        "secos": int((df["tipo"] == "SECO").sum()),
-        "coverage_increment": float(df.loc[df["tipo"] == "DUPLO", "p_top2"].sum()),
-        "entropy_duplos": float(df.loc[df["tipo"] == "DUPLO", "entropy_pred"].mean()),
-        "entropy_total": float(df["entropy_pred"].mean()),
+        "duplos": int((ticket_df["tipo"] == "DUPLO").sum()),
+        "secos": int((ticket_df["tipo"] == "SECO").sum()),
+        "coverage_increment": float(ticket_df.loc[ticket_df["tipo"] == "DUPLO", "p_top2"].sum()),
+        "entropy_duplos": float(ticket_df.loc[ticket_df["tipo"] == "DUPLO", "entropy_pred"].mean()),
+        "entropy_total": float(ticket_df["entropy_pred"].mean()),
         "top_duplos": top_duplos,
+        "top_pairs": top_pairs,
+        "p13_approx": float(metrics["p13"]),
+        "p14_approx": float(metrics["p14"]),
+        "p13_p14_ratio": float(metrics["p13"] / max(metrics["p14"], 1e-12)),
+        "pop_score": float(metrics["pop_score"]),
+        "contrarian_count": int(metrics["contrarian_count"]),
+        "favorite_heavy_count": int(metrics["favorite_heavy_count"]),
     }
 
-    return df, summary
+    return ticket_df, summary
+
+
+def _build_ticket(
+    df: pd.DataFrame,
+    duplo_indices: List[int],
+    contrarian_max: int,
+    contrarian_margin_max: float,
+    favorite_threshold: float,
+    favorite_alt_min: float,
+) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    ticket_df = df.copy()
+    ticket_df["tipo"] = "SECO"
+    if duplo_indices:
+        ticket_df.loc[duplo_indices, "tipo"] = "DUPLO"
+
+    secos_mask = ticket_df["tipo"] == "SECO"
+    ticket_df.loc[secos_mask, "seco_choice"] = ticket_df.loc[secos_mask, "top1"]
+    ticket_df.loc[secos_mask, "p_seco_choice"] = ticket_df.loc[secos_mask, "p_top1"]
+
+    contrarian_candidates = ticket_df[secos_mask].copy()
+    contrarian_candidates["contrarian"] = (
+        (contrarian_candidates["margem"] <= contrarian_margin_max)
+        | (
+            (contrarian_candidates["p_top1"] >= favorite_threshold)
+            & (contrarian_candidates["p_top2"] >= favorite_alt_min)
+        )
+    )
+    contrarian_candidates = contrarian_candidates[contrarian_candidates["contrarian"]]
+    if not contrarian_candidates.empty and contrarian_max > 0:
+        contrarian_candidates["cost_log_p13"] = (
+            np.log(contrarian_candidates["p_top1"].clip(1e-9))
+            - np.log(contrarian_candidates["p_top2"].clip(1e-9))
+        )
+        contrarian_candidates = contrarian_candidates.sort_values(
+            ["cost_log_p13", "margem"], ascending=[True, True]
+        )
+        chosen_indices = contrarian_candidates.head(contrarian_max).index
+        ticket_df.loc[chosen_indices, "seco_choice"] = ticket_df.loc[chosen_indices, "top2"]
+        ticket_df.loc[chosen_indices, "p_seco_choice"] = ticket_df.loc[chosen_indices, "p_top2"]
+
+    ticket_df["palpite"] = ticket_df.apply(
+        lambda row: _format_double(row["top1"], row["top2"])
+        if row["tipo"] == "DUPLO"
+        else row["seco_choice"],
+        axis=1,
+    )
+    metrics = _build_ticket_metrics(ticket_df, duplo_indices=duplo_indices)
+    return ticket_df, metrics
+
+
+def _build_ticket_metrics(ticket_df: pd.DataFrame, duplo_indices: List[int]) -> Dict[str, float]:
+    secos = ticket_df[ticket_df["tipo"] == "SECO"]
+    duplos = ticket_df.loc[duplo_indices] if duplo_indices else ticket_df[ticket_df["tipo"] == "DUPLO"]
+
+    log_p_secos = np.log(secos["p_seco_choice"].clip(1e-12)).sum() if not secos.empty else 0.0
+    d_values = duplos["d_duplo"].to_list()
+    if len(d_values) == 2:
+        d1, d2 = d_values
+        g13_component = d1 * (1 - d2) + d2 * (1 - d1)
+        p14_component = d1 * d2
+    elif len(d_values) == 1:
+        d1 = d_values[0]
+        g13_component = d1
+        p14_component = d1
+    else:
+        g13_component = 1.0
+        p14_component = 1.0
+
+    p13 = math.exp(log_p_secos) * g13_component
+    p14 = math.exp(log_p_secos) * p14_component
+
+    contrarian_count = int((secos["seco_choice"] == secos["top2"]).sum())
+    favorite_heavy_count = int((secos["p_top1"] >= 0.62).sum())
+    pop_score = float(np.log(secos["p_seco_choice"].clip(1e-12)).sum())
+
+    return {
+        "p13": float(p13),
+        "p14": float(p14),
+        "g13_component": float(g13_component),
+        "log_p13": float(math.log(max(p13, 1e-12))),
+        "log_p14": float(math.log(max(p14, 1e-12))),
+        "pop_score": pop_score,
+        "contrarian_count": contrarian_count,
+        "favorite_heavy_count": favorite_heavy_count,
+    }

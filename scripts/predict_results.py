@@ -129,6 +129,8 @@ def select_ticket(
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     df = score_duplos(df, alpha=alpha, beta=beta, gamma=gamma, delta=delta)
     logger = logging.getLogger("loteca")
+    ratio_eps = 0.01
+    ratio_eps_used = ratio_eps
 
     candidates = df[df["p_top1"] < max_favorite].copy()
     if len(candidates) < 2:
@@ -138,6 +140,20 @@ def select_ticket(
         ["score_duplo", "entropy_pred", "p_top2", "margem", "Jogo"],
         ascending=[False, False, False, True, True],
     )
+    if not candidates.empty:
+        top_n = min(24, len(candidates))
+        top_score_idx = candidates.head(top_n).index
+        low_d_idx = (
+            candidates.sort_values(
+                ["d_duplo", "entropy_pred", "p_top2", "score_duplo", "Jogo"],
+                ascending=[True, False, False, False, True],
+            )
+            .head(top_n)
+            .index
+        )
+        candidate_pool = candidates.loc[top_score_idx.union(low_d_idx)]
+    else:
+        candidate_pool = candidates.copy()
     top_duplos = []
     for _, row in candidates.head(6).iterrows():
         top_duplos.append(
@@ -156,55 +172,68 @@ def select_ticket(
     selected: List[int] = []
     pair_scores: List[Dict[str, float]] = []
     if len(candidates) >= 2:
-        candidate_indices = candidates.index.to_list()
-        for i, idx_a in enumerate(candidate_indices[:-1]):
-            for idx_b in candidate_indices[i + 1 :]:
-                duplo_indices = [idx_a, idx_b]
-                ticket_df, metrics = _build_ticket(
-                    df,
-                    duplo_indices=duplo_indices,
-                    contrarian_max=contrarian_max,
-                    contrarian_margin_max=contrarian_margin_max,
-                    contrarian_gain_min=contrarian_gain_min,
-                    contrarian_fav_bonus=contrarian_fav_bonus,
-                    favorite_threshold=favorite_threshold,
-                    favorite_alt_min=favorite_alt_min,
-                    d_target=d_target,
-                    double12_px_threshold=double12_px_threshold,
-                    double12_penalty_weight=double12_penalty_weight,
-                    favorite_duplo_penalty_weight=favorite_duplo_penalty_weight,
-                    favorite_heavy_penalty_weight=favorite_heavy_penalty_weight,
-                    lambda_p14=lambda_p14,
-                    mu_pop=mu_pop,
-                    d_target_weight=d_target_weight,
-                )
-                pop_rarity = metrics["pop_rarity"]
-                d_target_penalty = metrics["d_target_penalty"]
-                score_ticket = _score_ticket(
-                    metrics,
-                    lambda_p14=lambda_p14,
-                    mu_pop=mu_pop,
-                    d_target_weight=d_target_weight,
-                    double12_penalty_weight=double12_penalty_weight,
-                    favorite_duplo_penalty_weight=favorite_duplo_penalty_weight,
-                    favorite_heavy_penalty_weight=favorite_heavy_penalty_weight,
-                )
-                pair_scores.append(
-                    {
-                        "idx_a": int(idx_a),
-                        "idx_b": int(idx_b),
-                        "jogo_a": int(df.loc[idx_a, "Jogo"]),
-                        "jogo_b": int(df.loc[idx_b, "Jogo"]),
-                        "d1": float(df.loc[idx_a, "d_duplo"]),
-                        "d2": float(df.loc[idx_b, "d_duplo"]),
-                        "g13_component": float(metrics["g13_component"]),
-                        "p13": float(metrics["p13"]),
-                        "p14": float(metrics["p14"]),
-                        "pop_rarity": float(pop_rarity),
-                        "d_target_penalty": float(d_target_penalty),
-                        "score_ticket": float(score_ticket),
-                    }
-                )
+        def score_pairs(candidate_indices: List[int], eps: float) -> List[Dict[str, float]]:
+            scored: List[Dict[str, float]] = []
+            for i, idx_a in enumerate(candidate_indices[:-1]):
+                for idx_b in candidate_indices[i + 1 :]:
+                    duplo_indices = [idx_a, idx_b]
+                    ticket_df, metrics = _build_ticket(
+                        df,
+                        duplo_indices=duplo_indices,
+                        contrarian_max=contrarian_max,
+                        contrarian_margin_max=contrarian_margin_max,
+                        contrarian_gain_min=contrarian_gain_min,
+                        contrarian_fav_bonus=contrarian_fav_bonus,
+                        favorite_threshold=favorite_threshold,
+                        favorite_alt_min=favorite_alt_min,
+                        d_target=d_target,
+                        double12_px_threshold=double12_px_threshold,
+                        double12_penalty_weight=double12_penalty_weight,
+                        favorite_duplo_penalty_weight=favorite_duplo_penalty_weight,
+                        favorite_heavy_penalty_weight=favorite_heavy_penalty_weight,
+                        lambda_p14=lambda_p14,
+                        mu_pop=mu_pop,
+                        d_target_weight=d_target_weight,
+                    )
+                    ratio = metrics["p13"] / max(metrics["p14"], 1e-12)
+                    if ratio < 1.0 + eps:
+                        continue
+                    pop_rarity = metrics["pop_rarity"]
+                    d_target_penalty = metrics["d_target_penalty"]
+                    score_ticket = _score_ticket(
+                        metrics,
+                        lambda_p14=lambda_p14,
+                        mu_pop=mu_pop,
+                        d_target_weight=d_target_weight,
+                        double12_penalty_weight=double12_penalty_weight,
+                        favorite_duplo_penalty_weight=favorite_duplo_penalty_weight,
+                        favorite_heavy_penalty_weight=favorite_heavy_penalty_weight,
+                    )
+                    scored.append(
+                        {
+                            "idx_a": int(idx_a),
+                            "idx_b": int(idx_b),
+                            "jogo_a": int(df.loc[idx_a, "Jogo"]),
+                            "jogo_b": int(df.loc[idx_b, "Jogo"]),
+                            "d1": float(df.loc[idx_a, "d_duplo"]),
+                            "d2": float(df.loc[idx_b, "d_duplo"]),
+                            "g13_component": float(metrics["g13_component"]),
+                            "p13": float(metrics["p13"]),
+                            "p14": float(metrics["p14"]),
+                            "pop_rarity": float(pop_rarity),
+                            "d_target_penalty": float(d_target_penalty),
+                            "score_ticket": float(score_ticket),
+                        }
+                    )
+            return scored
+
+        candidate_indices = candidate_pool.index.to_list()
+        pair_scores = score_pairs(candidate_indices, ratio_eps)
+        if not pair_scores and len(candidate_pool) < len(candidates):
+            pair_scores = score_pairs(candidates.index.to_list(), ratio_eps)
+        if not pair_scores and ratio_eps > 0:
+            ratio_eps_used = 0.0
+            pair_scores = score_pairs(candidates.index.to_list(), ratio_eps_used)
         if pair_scores:
             pair_scores_sorted = sorted(pair_scores, key=lambda row: row["score_ticket"], reverse=True)
             best = pair_scores_sorted[0]
@@ -259,6 +288,7 @@ def select_ticket(
         "contrarian_count": int(metrics["contrarian_count"]),
         "favorite_heavy_count": int(metrics["favorite_heavy_count"]),
         "double12_penalty": float(metrics["double12_penalty"]),
+        "ratio_filter_eps": float(ratio_eps_used),
     }
 
     return ticket_df, summary
@@ -424,12 +454,12 @@ def _build_ticket_metrics(
         double12_penalty = float((duplos.loc[double12_mask, "px"] - double12_px_threshold).sum())
     else:
         double12_penalty = 0.0
-    if len(d_values) == 2:
-        d_target_penalty = (d_values[0] - d_target) ** 2 + (d_values[1] - d_target) ** 2
-    elif len(d_values) == 1:
-        d_target_penalty = (d_values[0] - d_target) ** 2
-    else:
-        d_target_penalty = 0.0
+    d_target_penalty = 0.0
+    if d_values:
+        high_k = 2.0
+        for d_val in d_values:
+            if d_val > d_target:
+                d_target_penalty += (d_val - d_target) ** 2 * high_k
     favorite_heavy_penalty = float(max(favorite_heavy_count - 2, 0))
 
     return {

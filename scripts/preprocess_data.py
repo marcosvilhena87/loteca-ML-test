@@ -110,6 +110,9 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df["px_market"] = p_norm["Odds_X"]
     df["p2_market"] = p_norm["Odds_2"]
     df["overround"] = overround
+    df["p1"] = df["p1_market"]
+    df["px"] = df["px_market"]
+    df["p2"] = df["p2_market"]
 
     df["log_odds_1"] = df["p1_market"].apply(_logit)
     df["log_odds_x"] = df["px_market"].apply(_logit)

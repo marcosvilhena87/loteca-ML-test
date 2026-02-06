@@ -61,7 +61,6 @@ def train_model(
     y_val = df.loc[val_idx, "target"].map({"1": 0, "X": 1, "2": 2}).to_numpy()
 
     model = LogisticRegression(
-        multi_class="multinomial",
         class_weight=class_weight,
         max_iter=1000,
         random_state=seed,

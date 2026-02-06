@@ -8,9 +8,9 @@ import pandas as pd
 def predict_probabilities(df: pd.DataFrame, model, feature_cols: List[str]) -> pd.DataFrame:
     probs = model.predict_proba(df[feature_cols].to_numpy())
     df = df.copy()
-    df["p1"] = probs[:, 0]
-    df["px"] = probs[:, 1]
-    df["p2"] = probs[:, 2]
+    df["p1_model"] = probs[:, 0]
+    df["px_model"] = probs[:, 1]
+    df["p2_model"] = probs[:, 2]
     return df
 
 

@@ -40,6 +40,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=0.6)
     parser.add_argument("--beta", type=float, default=0.3)
     parser.add_argument("--gamma", type=float, default=0.5)
+    parser.add_argument("--diversity_margin_min", type=float, default=0.05)
+    parser.add_argument("--diversity_entropy_min", type=float, default=0.05)
     parser.add_argument("--validation_split", type=float, default=0.2)
     return parser.parse_args()
 
@@ -121,6 +123,8 @@ def main() -> None:
         alpha=args.alpha,
         beta=args.beta,
         gamma=args.gamma,
+        diversity_margin_min=args.diversity_margin_min,
+        diversity_entropy_min=args.diversity_entropy_min,
     )
 
     logger.info("Ticket summary: %s", json.dumps(summary, ensure_ascii=False))

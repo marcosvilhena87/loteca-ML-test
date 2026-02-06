@@ -1,4 +1,5 @@
 import math
+import logging
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -67,8 +68,11 @@ def select_ticket(
     beta: float,
     gamma: float,
     max_favorite: float = 0.75,
+    diversity_entropy_min: float = 0.05,
+    diversity_margin_min: float = 0.05,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     df = score_duplos(df, alpha=alpha, beta=beta, gamma=gamma)
+    logger = logging.getLogger("loteca")
 
     candidates = df[df["p_top1"] < max_favorite].copy()
     if len(candidates) < 2:
@@ -101,8 +105,17 @@ def select_ticket(
                 break
             entropy_diff = abs(df.loc[idx, "entropy_pred"] - df.loc[selected[0], "entropy_pred"])
             margin_diff = abs(df.loc[idx, "margem"] - df.loc[selected[0], "margem"])
-            if entropy_diff > 0.05 or margin_diff > 0.05:
+            if entropy_diff > diversity_entropy_min or margin_diff > diversity_margin_min:
                 selected.append(idx)
+            else:
+                logger.info(
+                    "Reject Jogo %s: entropy_diff=%.4f, margin_diff=%.4f (thresholds %.2f/%.2f)",
+                    int(df.loc[idx, "Jogo"]),
+                    entropy_diff,
+                    margin_diff,
+                    diversity_entropy_min,
+                    diversity_margin_min,
+                )
         if len(selected) < 2:
             for idx in candidates.index:
                 if idx not in selected:

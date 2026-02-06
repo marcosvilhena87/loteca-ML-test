@@ -74,7 +74,25 @@ def select_ticket(
     if len(candidates) < 2:
         candidates = df.copy()
 
-    candidates = candidates.sort_values("score_duplo", ascending=False)
+    candidates = candidates.sort_values(
+        ["score_duplo", "entropy_pred", "p_top2", "margem", "Jogo"],
+        ascending=[False, False, False, True, True],
+    )
+    top_duplos = []
+    for _, row in candidates.head(6).iterrows():
+        top_duplos.append(
+            {
+                "Jogo": int(row["Jogo"]),
+                "top1": row["top1"],
+                "top2": row["top2"],
+                "p_top1": float(row["p_top1"]),
+                "p_top2": float(row["p_top2"]),
+                "margem": float(row["margem"]),
+                "entropy_pred": float(row["entropy_pred"]),
+                "overround": float(row["overround"]),
+                "score_duplo": float(row["score_duplo"]),
+            }
+        )
     selected = []
     if not candidates.empty:
         selected.append(candidates.index[0])
@@ -107,6 +125,7 @@ def select_ticket(
         "coverage_increment": float(df.loc[df["tipo"] == "DUPLO", "p_top2"].sum()),
         "entropy_duplos": float(df.loc[df["tipo"] == "DUPLO", "entropy_pred"].mean()),
         "entropy_total": float(df["entropy_pred"].mean()),
+        "top_duplos": top_duplos,
     }
 
     return df, summary

@@ -115,6 +115,7 @@ def main() -> None:
     log_dataset_stats(logger, upcoming_stats, upcoming_df)
 
     upcoming_df = predict_probabilities(upcoming_df, model, feature_cols)
+    upcoming_df = upcoming_df.sort_values(["Concurso", "Jogo"]).reset_index(drop=True)
     ticket_df, summary = select_ticket(
         upcoming_df,
         alpha=args.alpha,
@@ -123,6 +124,24 @@ def main() -> None:
     )
 
     logger.info("Ticket summary: %s", json.dumps(summary, ensure_ascii=False))
+    top_duplos = summary.get("top_duplos") or []
+    if top_duplos:
+        logger.info("Top-6 candidatos a duplo (rank por score_duplo):")
+        for rank, row in enumerate(top_duplos, start=1):
+            logger.info(
+                "Rank %s | Jogo %s | top1=%s top2=%s p_top1=%.4f p_top2=%.4f "
+                "margem=%.4f entropy_pred=%.4f overround=%.4f score_duplo=%.4f",
+                rank,
+                row["Jogo"],
+                row["top1"],
+                row["top2"],
+                row["p_top1"],
+                row["p_top2"],
+                row["margem"],
+                row["entropy_pred"],
+                row["overround"],
+                row["score_duplo"],
+            )
     logger.info(
         "Duplos selected: %s",
         ", ".join(ticket_df.loc[ticket_df["tipo"] == "DUPLO", "Jogo"].astype(str).tolist()),

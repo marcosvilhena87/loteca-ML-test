@@ -93,6 +93,8 @@ def _score_ticket(
     favorite_duplo_penalty_weight: float,
     favorite_heavy_penalty_weight: float,
 ) -> float:
+    if metrics.get("duplos_count") != 2:
+        return float("-inf")
     ratio_score = (metrics["log_p13"] - metrics["log_p14"]) * lambda_p14
     score = (
         ratio_score
@@ -209,6 +211,8 @@ def select_ticket(
                         favorite_duplo_penalty_weight=favorite_duplo_penalty_weight,
                         favorite_heavy_penalty_weight=favorite_heavy_penalty_weight,
                     )
+                    if not math.isfinite(score_ticket):
+                        continue
                     scored.append(
                         {
                             "idx_a": int(idx_a),
@@ -243,6 +247,14 @@ def select_ticket(
             top_pairs = []
     else:
         top_pairs = []
+
+    if not selected and len(candidates) >= 2:
+        fallback = candidates.sort_values(
+            ["score_duplo", "entropy_pred", "p_top2", "margem", "Jogo"],
+            ascending=[False, False, False, True, True],
+        ).head(2)
+        if len(fallback) >= 2:
+            selected = fallback.index.to_list()
 
     if selected:
         ticket_df, metrics = _build_ticket(
@@ -287,7 +299,11 @@ def select_ticket(
         "duplos": int((ticket_df["tipo"] == "DUPLO").sum()),
         "secos": int((ticket_df["tipo"] == "SECO").sum()),
         "coverage_increment": float(ticket_df.loc[ticket_df["tipo"] == "DUPLO", "p_top2"].sum()),
-        "entropy_duplos": float(ticket_df.loc[ticket_df["tipo"] == "DUPLO", "entropy_pred"].mean()),
+        "entropy_duplos": float(
+            ticket_df.loc[ticket_df["tipo"] == "DUPLO", "entropy_pred"].mean()
+            if (ticket_df["tipo"] == "DUPLO").any()
+            else 0.0
+        ),
         "entropy_total": float(ticket_df["entropy_pred"].mean()),
         "top_duplos": top_duplos,
         "top_pairs": top_pairs,
@@ -431,19 +447,16 @@ def _build_ticket_metrics(
     secos = ticket_df[ticket_df["tipo"] == "SECO"]
     duplos = ticket_df.loc[duplo_indices] if duplo_indices else ticket_df[ticket_df["tipo"] == "DUPLO"]
 
+    duplos_count = int(len(duplos))
     log_p_secos = np.log(secos["p_seco_choice"].clip(1e-12)).sum() if not secos.empty else 0.0
     d_values = duplos["d_duplo"].to_list()
     if len(d_values) == 2:
         d1, d2 = d_values
         g13_component = d1 * (1 - d2) + d2 * (1 - d1)
         p14_component = d1 * d2
-    elif len(d_values) == 1:
-        d1 = d_values[0]
-        g13_component = d1
-        p14_component = d1
     else:
-        g13_component = 1.0
-        p14_component = 1.0
+        g13_component = 0.0
+        p14_component = 0.0
 
     p13 = math.exp(log_p_secos) * g13_component
     p14 = math.exp(log_p_secos) * p14_component
@@ -487,4 +500,5 @@ def _build_ticket_metrics(
         "contrarian_count": contrarian_count,
         "favorite_heavy_count": favorite_heavy_count,
         "favorite_heavy_penalty": float(favorite_heavy_penalty),
+        "duplos_count": duplos_count,
     }

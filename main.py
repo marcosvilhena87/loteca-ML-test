@@ -212,7 +212,7 @@ def main() -> None:
     sum_p_top1_secos = float(secos["p_top1"].sum())
     sum_p_top2_duplos = float(duplos["p_top2"].sum())
     entropy_secos = float(secos["entropy_pred"].mean())
-    entropy_duplos = float(duplos["entropy_pred"].mean())
+    entropy_duplos = float(duplos["entropy_pred"].mean()) if not duplos.empty else 0.0
     logger.info(
         "Sanidade P13 | soma_p_top1_secos=%.4f soma_p_top2_duplos=%.4f "
         "entropy_secos=%.4f entropy_duplos=%.4f",

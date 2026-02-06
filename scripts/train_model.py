@@ -11,6 +11,8 @@ from sklearn.metrics import f1_score, log_loss
 @dataclass
 class TrainMetrics:
     logloss: float
+    market_logloss: float
+    logloss_delta_pct: float
     macro_f1: float
     brier_1: float
     brier_x: float
@@ -69,6 +71,12 @@ def train_model(
 
     val_probs = model.predict_proba(X_val)
     logloss = log_loss(y_val, val_probs, labels=[0, 1, 2])
+    market_probs = df.loc[val_idx, ["p1_market", "px_market", "p2_market"]].to_numpy()
+    market_logloss = log_loss(y_val, market_probs, labels=[0, 1, 2])
+    if market_logloss == 0:
+        logloss_delta_pct = 0.0
+    else:
+        logloss_delta_pct = (market_logloss - logloss) / market_logloss * 100
     macro_f1 = f1_score(y_val, model.predict(X_val), average="macro")
     brier = (val_probs - np.eye(3)[y_val]) ** 2
     brier_1 = brier[:, 0].mean()
@@ -78,6 +86,8 @@ def train_model(
 
     metrics = TrainMetrics(
         logloss=float(logloss),
+        market_logloss=float(market_logloss),
+        logloss_delta_pct=float(logloss_delta_pct),
         macro_f1=float(macro_f1),
         brier_1=float(brier_1),
         brier_x=float(brier_x),
@@ -106,6 +116,8 @@ def train_model(
 def metrics_to_dict(metrics: TrainMetrics) -> Dict[str, float]:
     return {
         "logloss": metrics.logloss,
+        "market_logloss": metrics.market_logloss,
+        "logloss_delta_pct": metrics.logloss_delta_pct,
         "macro_f1": metrics.macro_f1,
         "brier_1": metrics.brier_1,
         "brier_x": metrics.brier_x,

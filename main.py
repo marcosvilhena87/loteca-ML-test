@@ -104,6 +104,12 @@ def main() -> None:
     logger.info("Split stats: %s", json.dumps(split_stats, ensure_ascii=False))
     logger.info("Validation metrics: %s", json.dumps(metrics_to_dict(metrics), ensure_ascii=False))
     logger.info("Features used: %s", ", ".join(feature_cols))
+    logger.info(
+        "Baseline market logloss: %.6f | Model logloss: %.6f | Delta: %.2f%%",
+        metrics.market_logloss,
+        metrics.logloss,
+        metrics.logloss_delta_pct,
+    )
 
     upcoming_df, _, upcoming_stats = preprocess_dataset(args.upcoming, upcoming=True)
     log_dataset_stats(logger, upcoming_stats, upcoming_df)
@@ -120,6 +126,43 @@ def main() -> None:
     logger.info(
         "Duplos selected: %s",
         ", ".join(ticket_df.loc[ticket_df["tipo"] == "DUPLO", "Jogo"].astype(str).tolist()),
+    )
+    duplos_ranked = ticket_df.loc[ticket_df["tipo"] == "DUPLO"].sort_values(
+        "score_duplo", ascending=False
+    )
+    if not duplos_ranked.empty:
+        logger.info("Resumo duplos (rank por score_duplo):")
+        for rank, (_, row) in enumerate(duplos_ranked.iterrows(), start=1):
+            logger.info(
+                "Rank %s | Jogo %s: %s vs %s | top1=%s top2=%s p_top1=%.4f p_top2=%.4f "
+                "margem=%.4f entropy_pred=%.4f overround=%.4f score_duplo=%.4f",
+                rank,
+                row.get("Jogo"),
+                row.get("Mandante"),
+                row.get("Visitante"),
+                row.get("top1"),
+                row.get("top2"),
+                row.get("p_top1"),
+                row.get("p_top2"),
+                row.get("margem"),
+                row.get("entropy_pred"),
+                row.get("overround"),
+                row.get("score_duplo"),
+            )
+
+    secos = ticket_df.loc[ticket_df["tipo"] == "SECO"]
+    duplos = ticket_df.loc[ticket_df["tipo"] == "DUPLO"]
+    sum_p_top1_secos = float(secos["p_top1"].sum())
+    sum_p_top2_duplos = float(duplos["p_top2"].sum())
+    entropy_secos = float(secos["entropy_pred"].mean())
+    entropy_duplos = float(duplos["entropy_pred"].mean())
+    logger.info(
+        "Sanidade P13 | soma_p_top1_secos=%.4f soma_p_top2_duplos=%.4f "
+        "entropy_secos=%.4f entropy_duplos=%.4f",
+        sum_p_top1_secos,
+        sum_p_top2_duplos,
+        entropy_secos,
+        entropy_duplos,
     )
 
     audit_cols = [

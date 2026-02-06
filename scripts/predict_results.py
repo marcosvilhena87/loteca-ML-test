@@ -264,12 +264,23 @@ def select_ticket(
             d_target_weight=d_target_weight,
         )
     else:
-        ticket_df = df.copy()
-        metrics = _build_ticket_metrics(
-            ticket_df,
+        ticket_df, metrics = _build_ticket(
+            df,
             duplo_indices=[],
+            contrarian_max=contrarian_max,
+            contrarian_margin_max=contrarian_margin_max,
+            contrarian_gain_min=contrarian_gain_min,
+            contrarian_fav_bonus=contrarian_fav_bonus,
+            favorite_threshold=favorite_threshold,
+            favorite_alt_min=favorite_alt_min,
             d_target=d_target,
             double12_px_threshold=double12_px_threshold,
+            double12_penalty_weight=double12_penalty_weight,
+            favorite_duplo_penalty_weight=favorite_duplo_penalty_weight,
+            favorite_heavy_penalty_weight=favorite_heavy_penalty_weight,
+            lambda_p14=lambda_p14,
+            mu_pop=mu_pop,
+            d_target_weight=d_target_weight,
         )
 
     summary = {

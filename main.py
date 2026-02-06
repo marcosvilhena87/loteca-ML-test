@@ -41,10 +41,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta", type=float, default=0.3)
     parser.add_argument("--gamma", type=float, default=0.5)
     parser.add_argument("--delta", type=float, default=0.3)
-    parser.add_argument("--lambda_p14", type=float, default=0.5)
+    parser.add_argument("--lambda_p14", type=float, default=1.0)
     parser.add_argument("--mu_pop", type=float, default=0.2)
+    parser.add_argument("--d_target", type=float, default=0.73)
+    parser.add_argument("--d_target_weight", type=float, default=0.5)
     parser.add_argument("--contrarian_max", type=int, default=2)
     parser.add_argument("--contrarian_margin_max", type=float, default=0.05)
+    parser.add_argument("--contrarian_gain_min", type=float, default=0.1)
+    parser.add_argument("--contrarian_fav_bonus", type=float, default=0.15)
     parser.add_argument("--favorite_threshold", type=float, default=0.62)
     parser.add_argument("--favorite_alt_min", type=float, default=0.22)
     parser.add_argument("--mix_weight", type=float, default=0.2)
@@ -139,8 +143,12 @@ def main() -> None:
         delta=args.delta,
         lambda_p14=args.lambda_p14,
         mu_pop=args.mu_pop,
+        d_target=args.d_target,
+        d_target_weight=args.d_target_weight,
         contrarian_max=args.contrarian_max,
         contrarian_margin_max=args.contrarian_margin_max,
+        contrarian_gain_min=args.contrarian_gain_min,
+        contrarian_fav_bonus=args.contrarian_fav_bonus,
         favorite_threshold=args.favorite_threshold,
         favorite_alt_min=args.favorite_alt_min,
     )
@@ -211,7 +219,7 @@ def main() -> None:
         for rank, row in enumerate(top_pairs, start=1):
             logger.info(
                 "Rank %s | Jogos %s/%s | d1=%.4f d2=%.4f g13=%.4f P13=%.6f P14=%.6f "
-                "pop=%.4f score_ticket=%.4f",
+                "pop_rarity=%.4f d_target_penalty=%.4f score_ticket=%.4f",
                 rank,
                 row["jogo_a"],
                 row["jogo_b"],
@@ -220,8 +228,32 @@ def main() -> None:
                 row["g13_component"],
                 row["p13"],
                 row["p14"],
-                row["pop_score"],
+                row["pop_rarity"],
+                row["d_target_penalty"],
                 row["score_ticket"],
+            )
+    top_delta = (
+        ticket_df.assign(
+            delta_max=ticket_df[["p1_delta", "px_delta", "p2_delta"]].abs().max(axis=1)
+        )
+        .sort_values("delta_max", ascending=False)
+        .head(6)
+    )
+    if not top_delta.empty:
+        logger.info("Top-6 jogos por |delta| (blend ML x mercado):")
+        for rank, (_, row) in enumerate(top_delta.iterrows(), start=1):
+            logger.info(
+                "Rank %s | Jogo %s | delta_max=%.4f (p1=%.4f px=%.4f p2=%.4f) "
+                "tipo=%s contrarian=%s palpite=%s",
+                rank,
+                row["Jogo"],
+                row["delta_max"],
+                row["p1_delta"],
+                row["px_delta"],
+                row["p2_delta"],
+                row["tipo"],
+                row["is_contrarian"],
+                row["palpite"],
             )
 
     audit_cols = [
@@ -243,6 +275,7 @@ def main() -> None:
         "p3_duplo",
         "score_duplo",
         "tipo",
+        "is_contrarian",
         "seco_choice",
         "p_seco_choice",
     ]

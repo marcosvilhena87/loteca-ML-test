@@ -84,6 +84,27 @@ def _format_double(top1: str, top2: str) -> str:
     return "".join(ordered)
 
 
+def _score_ticket(
+    metrics: Dict[str, float],
+    lambda_p14: float,
+    mu_pop: float,
+    d_target_weight: float,
+    double12_penalty_weight: float,
+    favorite_duplo_penalty_weight: float,
+    favorite_heavy_penalty_weight: float,
+) -> float:
+    ratio_score = (metrics["log_p13"] - metrics["log_p14"]) * lambda_p14
+    score = (
+        ratio_score
+        + mu_pop * metrics["pop_rarity"]
+        - d_target_weight * metrics["d_target_penalty"]
+        - double12_penalty_weight * metrics["double12_penalty"]
+        - favorite_duplo_penalty_weight * metrics["duplo_favorite_logsum"]
+        - favorite_heavy_penalty_weight * metrics["favorite_heavy_penalty"]
+    )
+    return float(score)
+
+
 def select_ticket(
     df: pd.DataFrame,
     alpha: float,
@@ -100,6 +121,10 @@ def select_ticket(
     contrarian_fav_bonus: float,
     favorite_threshold: float,
     favorite_alt_min: float,
+    double12_px_threshold: float,
+    double12_penalty_weight: float,
+    favorite_duplo_penalty_weight: float,
+    favorite_heavy_penalty_weight: float,
     max_favorite: float = 0.75,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     df = score_duplos(df, alpha=alpha, beta=beta, gamma=gamma, delta=delta)
@@ -145,15 +170,24 @@ def select_ticket(
                     favorite_threshold=favorite_threshold,
                     favorite_alt_min=favorite_alt_min,
                     d_target=d_target,
+                    double12_px_threshold=double12_px_threshold,
+                    double12_penalty_weight=double12_penalty_weight,
+                    favorite_duplo_penalty_weight=favorite_duplo_penalty_weight,
+                    favorite_heavy_penalty_weight=favorite_heavy_penalty_weight,
+                    lambda_p14=lambda_p14,
+                    mu_pop=mu_pop,
+                    d_target_weight=d_target_weight,
                 )
-                log_p13 = metrics["log_p13"]
-                log_p14 = metrics["log_p14"]
                 pop_rarity = metrics["pop_rarity"]
                 d_target_penalty = metrics["d_target_penalty"]
-                score_ticket = (
-                    (log_p13 - lambda_p14 * log_p14)
-                    + mu_pop * pop_rarity
-                    - d_target_weight * d_target_penalty
+                score_ticket = _score_ticket(
+                    metrics,
+                    lambda_p14=lambda_p14,
+                    mu_pop=mu_pop,
+                    d_target_weight=d_target_weight,
+                    double12_penalty_weight=double12_penalty_weight,
+                    favorite_duplo_penalty_weight=favorite_duplo_penalty_weight,
+                    favorite_heavy_penalty_weight=favorite_heavy_penalty_weight,
                 )
                 pair_scores.append(
                     {
@@ -192,10 +226,22 @@ def select_ticket(
             favorite_threshold=favorite_threshold,
             favorite_alt_min=favorite_alt_min,
             d_target=d_target,
+            double12_px_threshold=double12_px_threshold,
+            double12_penalty_weight=double12_penalty_weight,
+            favorite_duplo_penalty_weight=favorite_duplo_penalty_weight,
+            favorite_heavy_penalty_weight=favorite_heavy_penalty_weight,
+            lambda_p14=lambda_p14,
+            mu_pop=mu_pop,
+            d_target_weight=d_target_weight,
         )
     else:
         ticket_df = df.copy()
-        metrics = _build_ticket_metrics(ticket_df, duplo_indices=[], d_target=d_target)
+        metrics = _build_ticket_metrics(
+            ticket_df,
+            duplo_indices=[],
+            d_target=d_target,
+            double12_px_threshold=double12_px_threshold,
+        )
 
     summary = {
         "duplos": int((ticket_df["tipo"] == "DUPLO").sum()),
@@ -212,6 +258,7 @@ def select_ticket(
         "pop_score_raw": float(metrics["pop_score_raw"]),
         "contrarian_count": int(metrics["contrarian_count"]),
         "favorite_heavy_count": int(metrics["favorite_heavy_count"]),
+        "double12_penalty": float(metrics["double12_penalty"]),
     }
 
     return ticket_df, summary
@@ -227,6 +274,13 @@ def _build_ticket(
     favorite_threshold: float,
     favorite_alt_min: float,
     d_target: float,
+    double12_px_threshold: float,
+    double12_penalty_weight: float,
+    favorite_duplo_penalty_weight: float,
+    favorite_heavy_penalty_weight: float,
+    lambda_p14: float,
+    mu_pop: float,
+    d_target_weight: float,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     ticket_df = df.copy()
     ticket_df["tipo"] = "SECO"
@@ -267,10 +321,50 @@ def _build_ticket(
         contrarian_candidates = contrarian_candidates.sort_values(
             ["contrarian_score", "margem"], ascending=[True, True]
         )
-        chosen_indices = contrarian_candidates.head(contrarian_max).index
-        ticket_df.loc[chosen_indices, "seco_choice"] = ticket_df.loc[chosen_indices, "top2"]
-        ticket_df.loc[chosen_indices, "p_seco_choice"] = ticket_df.loc[chosen_indices, "p_top2"]
-        ticket_df.loc[chosen_indices, "is_contrarian"] = True
+        if not contrarian_candidates.empty:
+            base_metrics = _build_ticket_metrics(
+                ticket_df,
+                duplo_indices=duplo_indices,
+                d_target=d_target,
+                double12_px_threshold=double12_px_threshold,
+            )
+            base_score = _score_ticket(
+                base_metrics,
+                lambda_p14=lambda_p14,
+                mu_pop=mu_pop,
+                d_target_weight=d_target_weight,
+                double12_penalty_weight=double12_penalty_weight,
+                favorite_duplo_penalty_weight=favorite_duplo_penalty_weight,
+                favorite_heavy_penalty_weight=favorite_heavy_penalty_weight,
+            )
+            chosen_indices: List[int] = []
+            for idx in contrarian_candidates.index:
+                if len(chosen_indices) >= contrarian_max:
+                    break
+                trial_ticket = ticket_df.copy()
+                trial_ticket.loc[idx, "seco_choice"] = trial_ticket.loc[idx, "top2"]
+                trial_ticket.loc[idx, "p_seco_choice"] = trial_ticket.loc[idx, "p_top2"]
+                trial_metrics = _build_ticket_metrics(
+                    trial_ticket,
+                    duplo_indices=duplo_indices,
+                    d_target=d_target,
+                    double12_px_threshold=double12_px_threshold,
+                )
+                trial_score = _score_ticket(
+                    trial_metrics,
+                    lambda_p14=lambda_p14,
+                    mu_pop=mu_pop,
+                    d_target_weight=d_target_weight,
+                    double12_penalty_weight=double12_penalty_weight,
+                    favorite_duplo_penalty_weight=favorite_duplo_penalty_weight,
+                    favorite_heavy_penalty_weight=favorite_heavy_penalty_weight,
+                )
+                if trial_score > base_score:
+                    ticket_df = trial_ticket
+                    base_score = trial_score
+                    chosen_indices.append(idx)
+            if chosen_indices:
+                ticket_df.loc[chosen_indices, "is_contrarian"] = True
 
     ticket_df["palpite"] = ticket_df.apply(
         lambda row: _format_double(row["top1"], row["top2"])
@@ -278,7 +372,12 @@ def _build_ticket(
         else row["seco_choice"],
         axis=1,
     )
-    metrics = _build_ticket_metrics(ticket_df, duplo_indices=duplo_indices, d_target=d_target)
+    metrics = _build_ticket_metrics(
+        ticket_df,
+        duplo_indices=duplo_indices,
+        d_target=d_target,
+        double12_px_threshold=double12_px_threshold,
+    )
     return ticket_df, metrics
 
 
@@ -286,6 +385,7 @@ def _build_ticket_metrics(
     ticket_df: pd.DataFrame,
     duplo_indices: List[int],
     d_target: float,
+    double12_px_threshold: float,
 ) -> Dict[str, float]:
     secos = ticket_df[ticket_df["tipo"] == "SECO"]
     duplos = ticket_df.loc[duplo_indices] if duplo_indices else ticket_df[ticket_df["tipo"] == "DUPLO"]
@@ -313,12 +413,24 @@ def _build_ticket_metrics(
     log_p_duplos_pop = float(np.log(duplos["d_duplo"].clip(1e-12)).sum()) if not duplos.empty else 0.0
     pop_score_raw = log_p_secos_pop + log_p_duplos_pop
     pop_rarity = -pop_score_raw
+    duplo_favorite_logsum = (
+        float(np.log(duplos["p_top1"].clip(1e-12)).sum()) if not duplos.empty else 0.0
+    )
+    if not duplos.empty:
+        duplo_formats = duplos.apply(
+            lambda row: _format_double(row["top1"], row["top2"]), axis=1
+        )
+        double12_mask = (duplo_formats == "12") & (duplos["px"] > double12_px_threshold)
+        double12_penalty = float((duplos.loc[double12_mask, "px"] - double12_px_threshold).sum())
+    else:
+        double12_penalty = 0.0
     if len(d_values) == 2:
         d_target_penalty = (d_values[0] - d_target) ** 2 + (d_values[1] - d_target) ** 2
     elif len(d_values) == 1:
         d_target_penalty = (d_values[0] - d_target) ** 2
     else:
         d_target_penalty = 0.0
+    favorite_heavy_penalty = float(max(favorite_heavy_count - 2, 0))
 
     return {
         "p13": float(p13),
@@ -328,7 +440,10 @@ def _build_ticket_metrics(
         "log_p14": float(math.log(max(p14, 1e-12))),
         "pop_score_raw": float(pop_score_raw),
         "pop_rarity": float(pop_rarity),
+        "duplo_favorite_logsum": float(duplo_favorite_logsum),
+        "double12_penalty": float(double12_penalty),
         "d_target_penalty": float(d_target_penalty),
         "contrarian_count": contrarian_count,
         "favorite_heavy_count": favorite_heavy_count,
+        "favorite_heavy_penalty": float(favorite_heavy_penalty),
     }

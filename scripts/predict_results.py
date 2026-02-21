@@ -122,8 +122,23 @@ def build_picks(games, double_games, mode_map):
                 pick = tuple(sorted((t2, t3)))
             picks[g["jogo"]] = set(pick)
         else:
-            picks[g["jogo"]] = {t1}
+            picks[g["jogo"]] = {mode_map[g["jogo"]]}
     return picks
+
+
+def sample_seco_choice(game, tau=1.8):
+    weighted = []
+    for cls in game["top_order"]:
+        weighted.append(max(game["adj_probs"][cls], 1e-9) ** tau)
+    total = sum(weighted) or 1.0
+    probs = [w / total for w in weighted]
+    r = random.random()
+    acc = 0.0
+    for idx, p in enumerate(probs):
+        acc += p
+        if r <= acc:
+            return game["top_order"][idx]
+    return game["top_order"][-1]
 
 
 def topk_selection_counts(games, picks):
@@ -234,6 +249,103 @@ def concentration_penalty(games, picks):
     return max_pair_share + max_bucket_share
 
 
+def evaluate_objective(games, picks, model, lambdas):
+    ev = evaluate_ticket(games, picks, n_sim=900)
+    pen_macro, g_mix = macro_penalty(games, picks, model)
+    pen_micro, micro_profile = micro_penalty(games, picks, model)
+    pen_struct, run_profile = struct_penalty(games, picks, model)
+    pen_conc = concentration_penalty(games, picks)
+
+    total_pen = (
+        lambdas["macro"] * pen_macro
+        + lambdas["micro"] * pen_micro
+        + lambdas["struct"] * pen_struct
+        + lambdas["conc"] * pen_conc
+    )
+    obj = ev - total_pen
+    return {
+        "objective": obj,
+        "ev": ev,
+        "score_breakdown": {
+            "pen_macro": pen_macro,
+            "pen_micro": pen_micro,
+            "pen_struct": pen_struct,
+            "pen_conc": pen_conc,
+            "weighted_penalty": total_pen,
+        },
+        "profiles": {
+            "g_mix": g_mix,
+            "micro": micro_profile,
+            "runs": run_profile,
+        },
+    }
+
+
+def top1_selection_sequence(games, picks):
+    ordered = sorted(games, key=lambda x: x["rank_r"])
+    return [1 if g["top_order"][0] in picks[g["jogo"]] else 0 for g in ordered]
+
+
+def find_longest_run_segments(seq):
+    if not seq:
+        return []
+    segments = []
+    start = 0
+    for i in range(1, len(seq) + 1):
+        if i == len(seq) or seq[i] != seq[i - 1]:
+            segments.append((start, i - 1, seq[i - 1]))
+            start = i
+    max_len = max(end - begin + 1 for begin, end, _ in segments)
+    return [s for s in segments if (s[1] - s[0] + 1) == max_len]
+
+
+def repair_secos(games, picks, double_games, model, lambdas, max_steps=8):
+    best_picks = {j: set(v) for j, v in picks.items()}
+    best_eval = evaluate_objective(games, best_picks, model, lambdas)
+    ordered = sorted(games, key=lambda x: x["rank_r"])
+    games_by_jogo = {g["jogo"]: g for g in games}
+
+    for _ in range(max_steps):
+        seq = top1_selection_sequence(games, best_picks)
+        segments = find_longest_run_segments(seq)
+        if not segments:
+            break
+
+        candidate_ids = set()
+        for begin, end, value in segments:
+            if value != 1:
+                continue
+            for idx in range(begin, end + 1):
+                jogo = ordered[idx]["jogo"]
+                if jogo not in double_games:
+                    candidate_ids.add(jogo)
+
+        if not candidate_ids:
+            break
+
+        improved = False
+        local_best_eval = best_eval
+        local_best_picks = best_picks
+        for jogo in candidate_ids:
+            g = games_by_jogo[jogo]
+            _, t2, t3 = g["top_order"]
+            for alt in (t2, t3):
+                trial = {j: set(v) for j, v in best_picks.items()}
+                trial[jogo] = {alt}
+                trial_eval = evaluate_objective(games, trial, model, lambdas)
+                if trial_eval["objective"] > local_best_eval["objective"]:
+                    local_best_eval = trial_eval
+                    local_best_picks = trial
+                    improved = True
+
+        if not improved:
+            break
+        best_eval = local_best_eval
+        best_picks = local_best_picks
+
+    return best_picks, best_eval
+
+
 def monte_carlo_optimize(games, model, iterations=4000, lambdas=None):
     if lambdas is None:
         lambdas = {"macro": 0.05, "micro": 0.08, "struct": 0.03, "conc": 0.05}
@@ -253,53 +365,46 @@ def monte_carlo_optimize(games, model, iterations=4000, lambdas=None):
                 t1, t2, t3 = g["top_order"]
                 options = [p[t1] + p[t2], p[t1] + p[t3], p[t2] + p[t3]]
                 mode_map[g["jogo"]] = max(range(3), key=lambda i: options[i] * random.uniform(0.9, 1.1))
+            else:
+                mode_map[g["jogo"]] = sample_seco_choice(g)
 
         picks = build_picks(games, double_games, mode_map)
-        ev = evaluate_ticket(games, picks, n_sim=900)
-
-        pen_macro, g_mix = macro_penalty(games, picks, model)
-        pen_micro, micro_profile = micro_penalty(games, picks, model)
-        pen_struct, run_profile = struct_penalty(games, picks, model)
-        pen_conc = concentration_penalty(games, picks)
-
-        total_pen = (
-            lambdas["macro"] * pen_macro
-            + lambdas["micro"] * pen_micro
-            + lambdas["struct"] * pen_struct
-            + lambdas["conc"] * pen_conc
-        )
-        obj = ev - total_pen
+        picks, evaluated = repair_secos(games, picks, double_games, model, lambdas)
+        obj = evaluated["objective"]
 
         if (best is None) or (obj > best["objective"]):
             best = {
-                "objective": obj,
-                "ev": ev,
+                "objective": evaluated["objective"],
+                "ev": evaluated["ev"],
                 "picks": picks,
                 "double_games": sorted(double_games),
-                "score_breakdown": {
-                    "pen_macro": pen_macro,
-                    "pen_micro": pen_micro,
-                    "pen_struct": pen_struct,
-                    "pen_conc": pen_conc,
-                    "weighted_penalty": total_pen,
-                },
-                "profiles": {
-                    "g_mix": g_mix,
-                    "micro": micro_profile,
-                    "runs": run_profile,
-                },
+                "score_breakdown": evaluated["score_breakdown"],
+                "profiles": evaluated["profiles"],
             }
             logger.debug(
                 "best-so-far obj=%.4f ev=%.4f macro=%.4f micro=%.4f struct=%.4f conc=%.4f",
-                obj,
-                ev,
-                pen_macro,
-                pen_micro,
-                pen_struct,
-                pen_conc,
+                evaluated["objective"],
+                evaluated["ev"],
+                evaluated["score_breakdown"]["pen_macro"],
+                evaluated["score_breakdown"]["pen_micro"],
+                evaluated["score_breakdown"]["pen_struct"],
+                evaluated["score_breakdown"]["pen_conc"],
             )
     return best
 
+
+def seco_choice_counts(games, picks):
+    counts = Counter({1: 0, 2: 0, 3: 0})
+    for g in games:
+        pick = picks[g["jogo"]]
+        if len(pick) != 1:
+            continue
+        cls = next(iter(pick))
+        for idx, top in enumerate(g["top_order"], start=1):
+            if cls == top:
+                counts[idx] += 1
+                break
+    return counts
 
 def pick_to_text(pick_set):
     if len(pick_set) == 1:
@@ -376,4 +481,13 @@ if __name__ == "__main__":
     logger.info("Perfil runs: %s", best["profiles"]["runs"])
     logger.info("Perfil bucket×classe: %s", best["profiles"]["micro"])
     logger.info("Jogos duplos: %s", best["double_games"])
+    top1_seq = top1_selection_sequence(games, best["picks"])
+    seco_counts = seco_choice_counts(games, best["picks"])
+    logger.info("Sequência top1 selecionado por rank: %s", "".join(str(v) for v in top1_seq))
+    logger.info(
+        "Secos por top-k: top1=%s top2=%s top3=%s",
+        seco_counts[1],
+        seco_counts[2],
+        seco_counts[3],
+    )
     logger.info("Predições salvas em %s", args.output)

@@ -8,6 +8,7 @@ import csv
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 from pathlib import Path
@@ -16,6 +17,10 @@ from typing import Dict, List
 LOGGER = logging.getLogger(__name__)
 OUTCOMES = ("1", "X", "2")
 DOUBLE_TOKENS = {"1X", "12", "X2"}
+
+def sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
+
 
 
 def setup_logging(debug_path: Path) -> None:
@@ -99,13 +104,48 @@ def renormalize(prob_map: Dict[str, float]) -> Dict[str, float]:
     return {k: v / total for k, v in prob_map.items()}
 
 
-def apply_bayesian_position_adjustment(market_probs: Dict[str, float], pos_profile: Dict[str, float]) -> Dict[str, float]:
-    adjusted = {
-        "1": market_probs["1"] * float(pos_profile.get("p_outcome_1", 1.0)),
-        "X": market_probs["X"] * float(pos_profile.get("p_outcome_X", 1.0)),
-        "2": market_probs["2"] * float(pos_profile.get("p_outcome_2", 1.0)),
+def apply_bayesian_position_adjustment(
+    market_probs: Dict[str, float], pos_profile: Dict[str, float], margin: float, blend_k: float = 12.0
+) -> Dict[str, float]:
+    prior = renormalize(
+        {
+            "1": float(pos_profile.get("p_outcome_1", 1 / 3)),
+            "X": float(pos_profile.get("p_outcome_X", 1 / 3)),
+            "2": float(pos_profile.get("p_outcome_2", 1 / 3)),
+        }
+    )
+    weight_market = sigmoid(blend_k * margin)
+    return {
+        symbol: (weight_market * market_probs[symbol]) + ((1.0 - weight_market) * prior[symbol])
+        for symbol in OUTCOMES
     }
-    return renormalize(adjusted)
+
+
+def card_metrics(per_match: List[dict], picks_by_game: Dict[int, str]) -> Dict[str, int]:
+    top2_single_exposed = sum(1 for g in per_match if picks_by_game[g["jogo"]] == g["top2"])
+    top2_covered_by_double = sum(
+        1 for g in per_match if picks_by_game[g["jogo"]] in DOUBLE_TOKENS and g["top2"] in picks_by_game[g["jogo"]]
+    )
+    top3_single_exposed = sum(1 for g in per_match if picks_by_game[g["jogo"]] == g["top3"])
+    dry_counts = {symbol: sum(1 for token in picks_by_game.values() if token == symbol) for symbol in OUTCOMES}
+    return {
+        "top2_single_exposed": top2_single_exposed,
+        "top2_covered_by_double": top2_covered_by_double,
+        "top2_exposed": top2_single_exposed + top2_covered_by_double,
+        "top3_exposed": top3_single_exposed,
+        "min_1_secos": dry_counts["1"],
+        "min_X_secos": dry_counts["X"],
+        "min_2_secos": dry_counts["2"],
+    }
+
+
+def hard_constraints_ok(per_match: List[dict], picks_by_game: Dict[int, str], target_top2_exposure: int, target_top3_exposure: int) -> bool:
+    metrics = card_metrics(per_match, picks_by_game)
+    if metrics["min_X_secos"] < 1 or metrics["min_2_secos"] < 1:
+        return False
+    if metrics["top2_exposed"] < target_top2_exposure:
+        return False
+    return metrics["top3_exposed"] >= max(0, target_top3_exposure - 1)
 
 
 def monte_carlo_distribution(
@@ -309,17 +349,79 @@ def generate_card(
             else:
                 top3_soft_done += 1
 
-    top2_exposed = sum(1 for g in per_match if g["top2"] in picks_by_game[g["jogo"]])
-    top3_exposed = sum(1 for g in per_match if picks_by_game[g["jogo"]] == g["top3"])
+    exposure_metrics = card_metrics(per_match, picks_by_game)
 
     return {
         "picks_by_game": picks_by_game,
         "card_hash": card_hash(picks_by_game),
         "double_games": sorted([g["jogo"] for g in selected_doubles]),
         "symbol_counts": symbol_counts,
-        "top2_exposed": top2_exposed,
-        "top3_exposed": top3_exposed,
+        **exposure_metrics,
     }
+
+
+def mutate_card(per_match: List[dict], base_picks: Dict[int, str], rng: random.Random) -> Dict[int, str]:
+    picks = base_picks.copy()
+    game = rng.choice(per_match)
+    jogo = game["jogo"]
+    move = rng.choice(("top1_to_top2", "flip_double", "reduce_run"))
+
+    if move == "top1_to_top2" and picks[jogo] == game["top1"]:
+        picks[jogo] = game["top2"]
+    elif move == "flip_double" and picks[jogo] in DOUBLE_TOKENS:
+        picks[jogo] = game["top1"]
+    elif move == "reduce_run":
+        prev = picks.get(jogo - 1)
+        if prev is not None and picks[jogo] == prev:
+            picks[jogo] = game["top2"] if game["top2"] != prev else game["top3"]
+    return picks
+
+
+def local_search(
+    per_match: List[dict],
+    card: dict,
+    target_top2_exposure: int,
+    target_top3_exposure: int,
+    rng: random.Random,
+    n_steps: int = 30,
+) -> dict:
+    best_picks = card["picks_by_game"].copy()
+    best_eh = expected_hits(per_match, best_picks, prob_prefix="prob")
+    for _ in range(n_steps):
+        trial = mutate_card(per_match, best_picks, rng)
+        if not hard_constraints_ok(per_match, trial, target_top2_exposure, target_top3_exposure):
+            continue
+        trial_eh = expected_hits(per_match, trial, prob_prefix="prob")
+        if trial_eh > best_eh:
+            best_picks, best_eh = trial, trial_eh
+
+    improved = card.copy()
+    improved["picks_by_game"] = best_picks
+    improved["card_hash"] = card_hash(best_picks)
+    improved.update(card_metrics(per_match, best_picks))
+    return improved
+
+
+def pareto_candidates(candidates: List[tuple], prob_12_floor: float = 0.20) -> List[tuple]:
+    feasible = [c for c in candidates if c[3]["P(12)"] >= prob_12_floor]
+    if not feasible:
+        feasible = candidates
+    frontier = []
+    for cand in feasible:
+        obj_a = cand[3]["P(13)"] + cand[3]["P(14)"]
+        obj_b = cand[3]["P(11)"] + cand[3]["P(12)"]
+        dominated = False
+        for other in feasible:
+            if other is cand:
+                continue
+            other_a = other[3]["P(13)"] + other[3]["P(14)"]
+            other_b = other[3]["P(11)"] + other[3]["P(12)"]
+            if other_a >= obj_a and other_b >= obj_b and (other_a > obj_a or other_b > obj_b):
+                dominated = True
+                break
+        if not dominated:
+            frontier.append(cand)
+    return frontier
 
 
 def score_from_distribution(mc: Dict[str, float], eh: float) -> float:
@@ -363,8 +465,10 @@ def main() -> None:
     for row in rows:
         pos = str(int(row["Jogo"]))
         market_probs = normalized_probs(row)
+        market_order = ordered_symbols(market_probs)
+        market_margin = market_probs[market_order[0]] - market_probs[market_order[1]]
         pos_profile = model["position_profiles"].get(pos, {})
-        probs = apply_bayesian_position_adjustment(market_probs, pos_profile)
+        probs = apply_bayesian_position_adjustment(market_probs, pos_profile, margin=market_margin)
         ordered = ordered_symbols(probs)
         top1, top2, top3 = ordered
         margin = probs[top1] - probs[top2]
@@ -373,9 +477,10 @@ def main() -> None:
         p_top2_hist = float(pos_profile.get("p_top2_hit", 0.3))
         p_top3_hist = float(pos_profile.get("p_top3_hit", 0.2))
 
-        w_pos = 1 + p_top2_hist - p_top1_hist
-        marginal_double_gain = probs[top2] * max(0.2, w_pos)
-        double_score = marginal_double_gain * (1 - margin)
+        delta_eh_double = probs[top1] + probs[top2] - probs[top1]
+        structural_cost = 0.15 * margin
+        marginal_double_gain = delta_eh_double
+        double_score = max(0.0, marginal_double_gain - structural_cost)
         zebra2_score = (1 - margin) * probs[top2] * (1 - p_top1_hist)
         zebra3_score = (1 - margin) * probs[top3] * (1 - p_top1_hist) * (0.75 + p_top3_hist)
 
@@ -436,6 +541,16 @@ def main() -> None:
                 low_margin_threshold=0.08,
                 top3_experimental_max=strategy_rng.randint(0, 1),
             )
+            card = local_search(
+                per_match,
+                card,
+                target_top2_exposure=2 + target_top2_exposure,
+                target_top3_exposure=target_top3_exposure,
+                rng=strategy_rng,
+                n_steps=30,
+            )
+            if not hard_constraints_ok(per_match, card["picks_by_game"], 2 + target_top2_exposure, target_top3_exposure):
+                continue
             if card["card_hash"] in seen_hashes:
                 continue
             seen_hashes.add(card["card_hash"])
@@ -456,16 +571,17 @@ def main() -> None:
                 prob_prefix="prob",
             )
             quick_score = combined_score(mc_quick_market, eh_market, mc_quick_adjusted, eh_adjusted)
-            quick_eval.append((quick_score, card, eh_market, eh_adjusted, mc_quick_adjusted))
+            quick_eval.append((quick_score, card, eh_market, eh_adjusted, mc_quick_adjusted, mc_quick_market))
 
         if not quick_eval:
-            raise RuntimeError(f"Estratégia {strategy['name']} não gerou cartões válidos.")
+            LOGGER.warning("Estratégia %s não gerou cartões válidos sob as restrições atuais.", strategy["name"])
+            continue
 
         quick_eval.sort(key=lambda x: x[0], reverse=True)
-        finalists = quick_eval[: min(5, len(quick_eval))]
+        finalists = quick_eval[: min(8, len(quick_eval))]
 
         best_full = None
-        for _, card, eh_market, eh_adjusted, _ in finalists:
+        for _, card, eh_market, eh_adjusted, _, _ in finalists:
             mc_full_market = monte_carlo_distribution(
                 per_match,
                 card["picks_by_game"],
@@ -498,7 +614,13 @@ def main() -> None:
             len(seen_hashes),
         )
 
-    _, best_strategy, best_card, mc_market, mc_adjusted, exp_hits_market, exp_hits_adjusted = sorted(evaluated, key=lambda x: x[0], reverse=True)[0]
+    if not evaluated:
+        raise RuntimeError("Nenhuma estratégia gerou cartões válidos com as restrições definidas.")
+
+    global_frontier = pareto_candidates(evaluated)
+    _, best_strategy, best_card, mc_market, mc_adjusted, exp_hits_market, exp_hits_adjusted = sorted(
+        global_frontier, key=lambda x: x[0], reverse=True
+    )[0]
     picks_by_game = best_card["picks_by_game"]
 
     LOGGER.info("Estratégia vencedora: %s", best_strategy["name"])
@@ -548,6 +670,14 @@ def main() -> None:
                 "Top3": game["top3"],
                 "Palpite": guess,
                 "Tipo": pick_type,
+                "P12": mc_market["P(12)"],
+                "P13": mc_market["P(13)"],
+                "P14": mc_market["P(14)"],
+                "MeanHits": mc_market["mean_hits"],
+                "StdHits": mc_market["std_hits"],
+                "Top2Secos": best_card["top2_single_exposed"],
+                "Top2Duplos": best_card["top2_covered_by_double"],
+                "Top3Secos": best_card["top3_exposed"],
             }
         )
 
@@ -561,7 +691,9 @@ def main() -> None:
     LOGGER.info("R14 probabilístico (top1/top2/top3): %s", r14_prob)
     LOGGER.info("Esperança histórica top hits por concurso: %s", expected)
     LOGGER.info(
-        "Exposição estrutural: top2_expostos=%s (meta~%s), top3_secos=%s (meta~%s)",
+        "Exposição estrutural: top2_secos=%s, top2_duplos=%s, top2_total=%s (meta~%s), top3_secos=%s (meta~%s)",
+        best_card["top2_single_exposed"],
+        best_card["top2_covered_by_double"],
         best_card["top2_exposed"],
         2 + target_top2_exposure,
         best_card["top3_exposed"],
@@ -575,7 +707,25 @@ def main() -> None:
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="") as handle:
-        fields = ["Concurso", "Jogo", "Mandante", "Visitante", "Top1", "Top2", "Top3", "Palpite", "Tipo"]
+        fields = [
+            "Concurso",
+            "Jogo",
+            "Mandante",
+            "Visitante",
+            "Top1",
+            "Top2",
+            "Top3",
+            "Palpite",
+            "Tipo",
+            "P12",
+            "P13",
+            "P14",
+            "MeanHits",
+            "StdHits",
+            "Top2Secos",
+            "Top2Duplos",
+            "Top3Secos",
+        ]
         writer = csv.DictWriter(handle, fieldnames=fields, delimiter=";")
         writer.writeheader()
         writer.writerows(prediction_rows)

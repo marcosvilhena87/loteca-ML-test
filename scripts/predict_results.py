@@ -43,13 +43,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-candidates",
         type=int,
-        default=int(os.getenv("LOTECA_N_CANDIDATES", "80")),
+        default=int(os.getenv("LOTECA_N_CANDIDATES", "300")),
         help="Quantidade de cartões candidatos por estratégia (30-200 recomendado).",
     )
     parser.add_argument(
         "--quick-simulations",
         type=int,
-        default=int(os.getenv("LOTECA_QUICK_SIMULATIONS", "5000")),
+        default=int(os.getenv("LOTECA_QUICK_SIMULATIONS", "8000")),
         help="Simulações rápidas para pré-seleção dos cartões candidatos.",
     )
     parser.add_argument(
@@ -105,7 +105,11 @@ def renormalize(prob_map: Dict[str, float]) -> Dict[str, float]:
 
 
 def apply_bayesian_position_adjustment(
-    market_probs: Dict[str, float], pos_profile: Dict[str, float], margin: float, blend_k: float = 12.0
+    market_probs: Dict[str, float],
+    pos_profile: Dict[str, float],
+    margin: float,
+    blend_k: float = 25.0,
+    market_floor: float = 0.85,
 ) -> Dict[str, float]:
     prior = renormalize(
         {
@@ -114,7 +118,7 @@ def apply_bayesian_position_adjustment(
             "2": float(pos_profile.get("p_outcome_2", 1 / 3)),
         }
     )
-    weight_market = sigmoid(blend_k * margin)
+    weight_market = max(market_floor, sigmoid(blend_k * margin))
     return {
         symbol: (weight_market * market_probs[symbol]) + ((1.0 - weight_market) * prior[symbol])
         for symbol in OUTCOMES
@@ -139,12 +143,20 @@ def card_metrics(per_match: List[dict], picks_by_game: Dict[int, str]) -> Dict[s
     }
 
 
-def hard_constraints_ok(per_match: List[dict], picks_by_game: Dict[int, str], target_top2_exposure: int, target_top3_exposure: int) -> bool:
+def hard_constraints_ok(
+    per_match: List[dict],
+    picks_by_game: Dict[int, str],
+    target_top2_exposure: int,
+    target_top3_exposure: int,
+    strict_top3: bool = True,
+) -> bool:
     metrics = card_metrics(per_match, picks_by_game)
     if metrics["min_X_secos"] < 1 or metrics["min_2_secos"] < 1:
         return False
     if metrics["top2_exposed"] < target_top2_exposure:
         return False
+    if strict_top3:
+        return metrics["top3_exposed"] >= target_top3_exposure
     return metrics["top3_exposed"] >= max(0, target_top3_exposure - 1)
 
 
@@ -433,11 +445,11 @@ def combined_score(
     eh_market: float,
     mc_adjusted: Dict[str, float],
     eh_adjusted: float,
-    market_weight: float = 0.7,
+    adjusted_tiebreak_weight: float = 0.05,
 ) -> float:
     market_component = score_from_distribution(mc_market, eh_market)
     adjusted_component = score_from_distribution(mc_adjusted, eh_adjusted)
-    return market_weight * market_component + (1.0 - market_weight) * adjusted_component
+    return market_component + adjusted_tiebreak_weight * adjusted_component
 
 
 def main() -> None:
@@ -460,6 +472,7 @@ def main() -> None:
     expected = model.get("expected_top_hits", {})
     target_top2_exposure = max(0, round(float(expected.get("top2", 0.0)) - 2))
     target_top3_exposure = max(0, round(float(expected.get("top3", 0.0))))
+    strict_top3 = os.getenv("LOTECA_STRICT_TOP3", "1") != "0"
 
     per_match = []
     for row in rows:
@@ -535,10 +548,10 @@ def main() -> None:
                 strategy["l2"],
                 strategy["l3"],
                 rng=strategy_rng,
-                double_top_k=5,
-                zebra_top_m=strategy_rng.randint(5, 10),
-                perturb_prob=0.15,
-                low_margin_threshold=0.08,
+                double_top_k=strategy_rng.randint(8, 12),
+                zebra_top_m=strategy_rng.randint(8, 14),
+                perturb_prob=0.25,
+                low_margin_threshold=0.10,
                 top3_experimental_max=strategy_rng.randint(0, 1),
             )
             card = local_search(
@@ -549,7 +562,13 @@ def main() -> None:
                 rng=strategy_rng,
                 n_steps=30,
             )
-            if not hard_constraints_ok(per_match, card["picks_by_game"], 2 + target_top2_exposure, target_top3_exposure):
+            if not hard_constraints_ok(
+                per_match,
+                card["picks_by_game"],
+                2 + target_top2_exposure,
+                target_top3_exposure,
+                strict_top3=strict_top3,
+            ):
                 continue
             if card["card_hash"] in seen_hashes:
                 continue
@@ -570,18 +589,19 @@ def main() -> None:
                 seed=args.mc_seed,
                 prob_prefix="prob",
             )
-            quick_score = combined_score(mc_quick_market, eh_market, mc_quick_adjusted, eh_adjusted)
-            quick_eval.append((quick_score, card, eh_market, eh_adjusted, mc_quick_adjusted, mc_quick_market))
+            quick_score = score_from_distribution(mc_quick_market, eh_market)
+            quick_tiebreak = score_from_distribution(mc_quick_adjusted, eh_adjusted)
+            quick_eval.append((quick_score, quick_tiebreak, card, eh_market, eh_adjusted, mc_quick_adjusted, mc_quick_market))
 
         if not quick_eval:
             LOGGER.warning("Estratégia %s não gerou cartões válidos sob as restrições atuais.", strategy["name"])
             continue
 
-        quick_eval.sort(key=lambda x: x[0], reverse=True)
+        quick_eval.sort(key=lambda x: (x[0], x[1]), reverse=True)
         finalists = quick_eval[: min(8, len(quick_eval))]
 
         best_full = None
-        for _, card, eh_market, eh_adjusted, _, _ in finalists:
+        for _, _, card, eh_market, eh_adjusted, _, _ in finalists:
             mc_full_market = monte_carlo_distribution(
                 per_match,
                 card["picks_by_game"],
@@ -604,7 +624,7 @@ def main() -> None:
         assert best_full is not None
         evaluated.append(best_full)
         LOGGER.info(
-            "Estratégia %s | best_score=%.6f | expected_hits_market=%.4f | expected_hits_adjusted=%.4f | MC_market=%s | card_hash=%s | candidatos_unicos=%s",
+            "Estratégia %s | best_score=%.6f | expected_hits_market=%.4f | expected_hits_adjusted=%.4f | MC_market=%s | card_hash=%s | candidatos_unicos=%s | strict_top3=%s",
             strategy["name"],
             best_full[0],
             best_full[5],
@@ -612,6 +632,7 @@ def main() -> None:
             best_full[3],
             best_full[2]["card_hash"],
             len(seen_hashes),
+            strict_top3,
         )
 
     if not evaluated:

@@ -109,7 +109,7 @@ def apply_bayesian_position_adjustment(market_probs: Dict[str, float], pos_profi
 
 
 def monte_carlo_distribution(
-    per_match: List[dict], picks_by_game: Dict[int, str], n_simulations: int, seed: int
+    per_match: List[dict], picks_by_game: Dict[int, str], n_simulations: int, seed: int, prob_prefix: str = "prob"
 ) -> Dict[str, float]:
     bins = {f"P({k})": 0 for k in range(11, 15)}
     rng = random.Random(seed)
@@ -123,7 +123,7 @@ def monte_carlo_distribution(
             cumulative = 0.0
             sampled = "2"
             for outcome in OUTCOMES:
-                cumulative += game[f"prob_{outcome}"]
+                cumulative += game[f"{prob_prefix}_{outcome}"]
                 if draw <= cumulative:
                     sampled = outcome
                     break
@@ -206,8 +206,29 @@ def generate_card(
     rng: random.Random,
     double_top_k: int,
     zebra_top_m: int,
+    perturb_prob: float,
+    low_margin_threshold: float,
+    top3_experimental_max: int,
 ) -> dict:
     picks_by_game = {g["jogo"]: g["top1"] for g in per_match}
+
+    low_margin_games = [g for g in per_match if g["margin"] <= low_margin_threshold]
+    for game in low_margin_games:
+        if rng.random() < perturb_prob:
+            picks_by_game[game["jogo"]] = game["top2"]
+
+    top3_experimental_done = 0
+    for game in sorted(per_match, key=lambda g: g["zebra3_score"], reverse=True):
+        if top3_experimental_done >= top3_experimental_max:
+            break
+        if picks_by_game[game["jogo"]] != game["top1"]:
+            continue
+
+        experimental_penalty = 0.35 * (game["prob_" + game["top1"]] - game["prob_" + game["top3"]])
+        experimental_utility = game["zebra3_score"] - experimental_penalty
+        if experimental_utility > -0.01:
+            picks_by_game[game["jogo"]] = game["top3"]
+            top3_experimental_done += 1
 
     used_games = set()
     double_candidates = sorted(per_match, key=lambda g: g["double_score"], reverse=True)
@@ -355,6 +376,9 @@ def main() -> None:
                 "prob_1": probs["1"],
                 "prob_X": probs["X"],
                 "prob_2": probs["2"],
+                "market_prob_1": market_probs["1"],
+                "market_prob_X": market_probs["X"],
+                "market_prob_2": market_probs["2"],
                 "top1": top1,
                 "top2": top2,
                 "top3": top3,
@@ -396,13 +420,29 @@ def main() -> None:
                 rng=strategy_rng,
                 double_top_k=5,
                 zebra_top_m=strategy_rng.randint(5, 10),
+                perturb_prob=0.15,
+                low_margin_threshold=0.08,
+                top3_experimental_max=strategy_rng.randint(0, 1),
             )
             if card["card_hash"] in seen_hashes:
                 continue
             seen_hashes.add(card["card_hash"])
             eh = expected_hits(per_match, card["picks_by_game"])
-            mc_quick = monte_carlo_distribution(per_match, card["picks_by_game"], n_simulations=quick_n, seed=args.mc_seed)
-            quick_eval.append((score_from_distribution(mc_quick, eh), card, eh))
+            mc_quick_market = monte_carlo_distribution(
+                per_match,
+                card["picks_by_game"],
+                n_simulations=quick_n,
+                seed=args.mc_seed,
+                prob_prefix="market_prob",
+            )
+            mc_quick_adjusted = monte_carlo_distribution(
+                per_match,
+                card["picks_by_game"],
+                n_simulations=quick_n,
+                seed=args.mc_seed,
+                prob_prefix="prob",
+            )
+            quick_eval.append((score_from_distribution(mc_quick_market, eh), card, eh, mc_quick_adjusted))
 
         if not quick_eval:
             raise RuntimeError(f"Estratégia {strategy['name']} não gerou cartões válidos.")
@@ -411,15 +451,23 @@ def main() -> None:
         finalists = quick_eval[: min(5, len(quick_eval))]
 
         best_full = None
-        for _, card, eh in finalists:
-            mc_full = monte_carlo_distribution(
+        for _, card, eh, _ in finalists:
+            mc_full_market = monte_carlo_distribution(
                 per_match,
                 card["picks_by_game"],
                 n_simulations=args.n_simulations,
                 seed=args.mc_seed,
+                prob_prefix="market_prob",
             )
-            final_score = score_from_distribution(mc_full, eh)
-            candidate = (final_score, strategy, card, mc_full, eh)
+            mc_full_adjusted = monte_carlo_distribution(
+                per_match,
+                card["picks_by_game"],
+                n_simulations=args.n_simulations,
+                seed=args.mc_seed,
+                prob_prefix="prob",
+            )
+            final_score = score_from_distribution(mc_full_market, eh)
+            candidate = (final_score, strategy, card, mc_full_market, mc_full_adjusted, eh)
             if best_full is None or candidate[0] > best_full[0]:
                 best_full = candidate
 
@@ -429,13 +477,13 @@ def main() -> None:
             "Estratégia %s | best_score=%.6f | expected_hits=%.4f | MC=%s | card_hash=%s | candidatos_unicos=%s",
             strategy["name"],
             best_full[0],
-            best_full[4],
+            best_full[5],
             best_full[3],
             best_full[2]["card_hash"],
             len(seen_hashes),
         )
 
-    _, best_strategy, best_card, mc, exp_hits = sorted(evaluated, key=lambda x: x[0], reverse=True)[0]
+    _, best_strategy, best_card, mc_market, mc_adjusted, exp_hits = sorted(evaluated, key=lambda x: x[0], reverse=True)[0]
     picks_by_game = best_card["picks_by_game"]
 
     LOGGER.info("Estratégia vencedora: %s", best_strategy["name"])
@@ -506,7 +554,8 @@ def main() -> None:
     )
     LOGGER.info("Dispersão símbolos em secos: %s", best_card["symbol_counts"])
     LOGGER.info("Expected hits do cartão: %.4f", exp_hits)
-    LOGGER.info("Monte Carlo (%s sims): %s", args.n_simulations, mc)
+    LOGGER.info("Monte Carlo market (%s sims): %s", args.n_simulations, mc_market)
+    LOGGER.info("Monte Carlo adjusted (%s sims): %s", args.n_simulations, mc_adjusted)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="") as handle:

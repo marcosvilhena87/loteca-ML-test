@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Generate Loteca palpite with 12 secos, 2 duplos, 0 triplos."""
+"""Generate Loteca palpite with strategy search and Monte Carlo evaluation."""
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import logging
+import os
 import random
 from pathlib import Path
 from typing import Dict, List
@@ -22,6 +24,17 @@ def setup_logging(debug_path: Path) -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[logging.FileHandler(debug_path, mode="a", encoding="utf-8"), logging.StreamHandler()],
     )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Gera palpites Loteca com busca de estratégias irmãs.")
+    parser.add_argument(
+        "--n-simulations",
+        type=int,
+        default=int(os.getenv("LOTECA_N_SIMULATIONS", "200000")),
+        help="Número de simulações do Monte Carlo (também lê LOTECA_N_SIMULATIONS).",
+    )
+    return parser.parse_args()
 
 
 def parse_decimal(value: str) -> float:
@@ -68,21 +81,19 @@ def renormalize(prob_map: Dict[str, float]) -> Dict[str, float]:
 
 
 def apply_bayesian_position_adjustment(market_probs: Dict[str, float], pos_profile: Dict[str, float]) -> Dict[str, float]:
-    ordered_market = ordered_symbols(market_probs)
-    rank_key = {
-        ordered_market[0]: "p_top1_hit",
-        ordered_market[1]: "p_top2_hit",
-        ordered_market[2]: "p_top3_hit",
-    }
     adjusted = {
-        outcome: market_probs[outcome] * float(pos_profile.get(rank_key[outcome], 1.0)) for outcome in OUTCOMES
+        "1": market_probs["1"] * float(pos_profile.get("p_outcome_1", 1.0)),
+        "X": market_probs["X"] * float(pos_profile.get("p_outcome_X", 1.0)),
+        "2": market_probs["2"] * float(pos_profile.get("p_outcome_2", 1.0)),
     }
     return renormalize(adjusted)
 
 
-def monte_carlo_distribution(per_match: List[dict], picks_by_game: Dict[int, str], n_simulations: int = 20000) -> Dict[str, float]:
+def monte_carlo_distribution(per_match: List[dict], picks_by_game: Dict[int, str], n_simulations: int) -> Dict[str, float]:
     bins = {f"P({k})": 0 for k in range(11, 15)}
     rng = random.Random(2025)
+    hits_sum = 0.0
+    hits_sq_sum = 0.0
 
     for _ in range(n_simulations):
         hits = 0
@@ -100,11 +111,28 @@ def monte_carlo_distribution(per_match: List[dict], picks_by_game: Dict[int, str
             if sampled in pick_token:
                 hits += 1
 
+        hits_sum += hits
+        hits_sq_sum += hits * hits
         for k in range(11, 15):
             if hits >= k:
                 bins[f"P({k})"] += 1
 
-    return {k: v / n_simulations for k, v in bins.items()}
+    mean_hits = hits_sum / n_simulations
+    var_hits = max(0.0, (hits_sq_sum / n_simulations) - (mean_hits * mean_hits))
+    std_hits = var_hits**0.5
+
+    result = {k: v / n_simulations for k, v in bins.items()}
+    result["mean_hits"] = mean_hits
+    result["std_hits"] = std_hits
+    return result
+
+
+def expected_hits(per_match: List[dict], picks_by_game: Dict[int, str]) -> float:
+    exp = 0.0
+    for game in per_match:
+        token = picks_by_game[game["jogo"]]
+        exp += sum(game[f"prob_{outcome}"] for outcome in OUTCOMES if outcome in token)
+    return exp
 
 
 def symbol_excess_penalty(token: str, counts: Dict[str, int], target_each: float = 14 / 3) -> float:
@@ -130,7 +158,107 @@ def run_penalty(jogo: int, token: str, picks_by_game: Dict[int, str], window: in
     return penalty
 
 
+def generate_card(
+    per_match: List[dict],
+    target_top2_exposure: int,
+    target_top3_exposure: int,
+    max_top2_zebras: int,
+    max_top3_zebras: int,
+    lambda_top2: float,
+    lambda_top3: float,
+) -> dict:
+    picks_by_game = {g["jogo"]: g["top1"] for g in per_match}
+
+    used_games = set()
+    double_candidates = sorted(per_match, key=lambda g: g["double_score"], reverse=True)
+    selected_doubles = []
+    for candidate in double_candidates:
+        if candidate["jogo"] in used_games:
+            continue
+        if any(abs(candidate["jogo"] - d["jogo"]) <= 1 for d in selected_doubles):
+            continue
+        selected_doubles.append(candidate)
+        used_games.add(candidate["jogo"])
+        if len(selected_doubles) == 2:
+            break
+
+    if len(selected_doubles) < 2:
+        for candidate in double_candidates:
+            if candidate["jogo"] in used_games:
+                continue
+            selected_doubles.append(candidate)
+            used_games.add(candidate["jogo"])
+            if len(selected_doubles) == 2:
+                break
+
+    for game in selected_doubles:
+        picks_by_game[game["jogo"]] = double_token(game["top1"], game["top2"])
+
+    symbol_counts = {"1": 0, "X": 0, "2": 0}
+    for token in picks_by_game.values():
+        if token in symbol_counts:
+            symbol_counts[token] += 1
+
+    changed_games = set()
+    top2_soft_done = 0
+    top3_soft_done = 0
+
+    for zlabel in ("top2", "top3"):
+        zebra_done = 0
+        zebra_cap = max_top2_zebras if zlabel == "top2" else max_top3_zebras
+        candidates = sorted(per_match, key=lambda g: g[f"zebra{2 if zlabel == 'top2' else 3}_score"], reverse=True)
+        for game in candidates:
+            if zebra_done >= zebra_cap:
+                break
+            jogo = game["jogo"]
+            if jogo in changed_games or picks_by_game[jogo] in DOUBLE_TOKENS:
+                continue
+
+            token = game[zlabel]
+            score_key = "zebra2_score" if zlabel == "top2" else "zebra3_score"
+            cost = 0.2 * (game["prob_" + game["top1"]] - game["prob_" + token])
+            cost += 0.10 * symbol_excess_penalty(token, symbol_counts)
+            cost += 0.10 * run_penalty(jogo, token, picks_by_game)
+            utility = game[score_key] - cost
+
+            # Soft constraint: bônus marginal até a meta, sem forçar aplicação.
+            bonus = 0.0
+            if zlabel == "top2" and top2_soft_done < target_top2_exposure:
+                bonus = lambda_top2 * (target_top2_exposure - top2_soft_done)
+            if zlabel == "top3" and top3_soft_done < target_top3_exposure:
+                bonus = lambda_top3 * (target_top3_exposure - top3_soft_done)
+
+            if utility <= 0:
+                continue
+            if utility + bonus <= 0:
+                continue
+
+            old = picks_by_game[jogo]
+            picks_by_game[jogo] = token
+            if old in symbol_counts:
+                symbol_counts[old] -= 1
+            symbol_counts[token] += 1
+            changed_games.add(jogo)
+            zebra_done += 1
+            if zlabel == "top2":
+                top2_soft_done += 1
+            else:
+                top3_soft_done += 1
+
+    top2_exposed = sum(1 for g in per_match if picks_by_game[g["jogo"]] == g["top2"] or picks_by_game[g["jogo"]] in DOUBLE_TOKENS)
+    top3_exposed = sum(1 for g in per_match if picks_by_game[g["jogo"]] == g["top3"])
+
+    return {
+        "picks_by_game": picks_by_game,
+        "double_games": sorted([g["jogo"] for g in selected_doubles]),
+        "symbol_counts": symbol_counts,
+        "top2_exposed": top2_exposed,
+        "top3_exposed": top3_exposed,
+    }
+
+
 def main() -> None:
+    args = parse_args()
     root = Path(__file__).resolve().parents[1]
     next_path = root / "data" / "proximo_concurso.csv"
     model_path = root / "models" / "model.json"
@@ -193,112 +321,40 @@ def main() -> None:
             }
         )
 
-    picks_by_game = {g["jogo"]: g["top1"] for g in per_match}
-
-    # Seleção de duplos com ganho marginal bayesiano + dispersão posicional.
-    used_games = set()
-    double_candidates = sorted(per_match, key=lambda g: g["double_score"], reverse=True)
-    selected_doubles = []
-    for candidate in double_candidates:
-        if candidate["jogo"] in used_games:
-            continue
-        if any(abs(candidate["jogo"] - d["jogo"]) <= 1 for d in selected_doubles):
-            continue
-        selected_doubles.append(candidate)
-        used_games.add(candidate["jogo"])
-        if len(selected_doubles) == 2:
-            break
-
-    if len(selected_doubles) < 2:
-        for candidate in double_candidates:
-            if candidate["jogo"] in used_games:
-                continue
-            selected_doubles.append(candidate)
-            used_games.add(candidate["jogo"])
-            if len(selected_doubles) == 2:
-                break
-
-    for game in selected_doubles:
-        picks_by_game[game["jogo"]] = double_token(game["top1"], game["top2"])
-
-    # Exposição estrutural controlada para top2/top3 via secos não-top1.
-    symbol_counts = {"1": 0, "X": 0, "2": 0}
-    for token in picks_by_game.values():
-        if token in symbol_counts:
-            symbol_counts[token] += 1
-
-    available_for_zebra = [
-        g for g in per_match if picks_by_game[g["jogo"]] not in DOUBLE_TOKENS
+    strategies = [
+        {"name": "A_base_soft", "max2": target_top2_exposure, "max3": target_top3_exposure, "l2": 0.010, "l3": 0.008},
+        {"name": "B_pos_only", "max2": max(1, target_top2_exposure), "max3": max(0, target_top3_exposure - 1), "l2": 0.006, "l3": 0.004},
+        {"name": "C_cap_3_2", "max2": 3, "max3": 2, "l2": 0.009, "l3": 0.007},
     ]
 
-    zebra2_candidates = sorted(available_for_zebra, key=lambda g: g["zebra2_score"], reverse=True)
-    zebra3_candidates = sorted(available_for_zebra, key=lambda g: g["zebra3_score"], reverse=True)
+    evaluated = []
+    for strategy in strategies:
+        card = generate_card(
+            per_match,
+            target_top2_exposure,
+            target_top3_exposure,
+            strategy["max2"],
+            strategy["max3"],
+            strategy["l2"],
+            strategy["l3"],
+        )
+        mc = monte_carlo_distribution(per_match, card["picks_by_game"], n_simulations=args.n_simulations)
+        eh = expected_hits(per_match, card["picks_by_game"])
+        overall_score = mc["P(12)"] + 2.0 * mc["P(13)"] + 5.0 * mc["P(14)"] + 0.01 * eh
+        evaluated.append((overall_score, strategy, card, mc, eh))
+        LOGGER.info(
+            "Estratégia %s | score=%.6f | expected_hits=%.4f | MC=%s",
+            strategy["name"],
+            overall_score,
+            eh,
+            mc,
+        )
 
-    zebra2_done = 0
-    changed_games = set()
-    zebra2_ranked = []
-    for game in zebra2_candidates:
-        jogo = game["jogo"]
-        token = game["top2"]
-        cost = 0.2 * (game["prob_" + game["top1"]] - game["prob_" + token])
-        cost += 0.10 * symbol_excess_penalty(token, symbol_counts)
-        cost += 0.10 * run_penalty(jogo, token, picks_by_game)
-        utility = game["zebra2_score"] - cost
-        zebra2_ranked.append((utility, game))
+    _, best_strategy, best_card, mc, exp_hits = sorted(evaluated, key=lambda x: x[0], reverse=True)[0]
+    picks_by_game = best_card["picks_by_game"]
 
-    for utility, game in sorted(zebra2_ranked, key=lambda x: x[0], reverse=True):
-        if zebra2_done >= target_top2_exposure:
-            break
-        jogo = game["jogo"]
-        token = game["top2"]
-        if jogo in changed_games:
-            continue
-        if picks_by_game[jogo] in DOUBLE_TOKENS:
-            continue
-
-        old = picks_by_game[jogo]
-        picks_by_game[jogo] = token
-        if old in symbol_counts:
-            symbol_counts[old] -= 1
-        symbol_counts[token] += 1
-        changed_games.add(jogo)
-        zebra2_done += 1
-        LOGGER.info("Zebra top2 aplicada no jogo %s (utilidade=%.4f).", jogo, utility)
-
-    zebra3_done = 0
-    zebra3_ranked = []
-    for game in zebra3_candidates:
-        jogo = game["jogo"]
-        token = game["top3"]
-        if picks_by_game[jogo] in DOUBLE_TOKENS:
-            continue
-        cost = 0.2 * (game["prob_" + game["top1"]] - game["prob_" + token])
-        cost += 0.10 * symbol_excess_penalty(token, symbol_counts)
-        cost += 0.10 * run_penalty(jogo, token, picks_by_game)
-        utility = game["zebra3_score"] - cost
-        zebra3_ranked.append((utility, game))
-
-    for utility, game in sorted(zebra3_ranked, key=lambda x: x[0], reverse=True):
-        if zebra3_done >= target_top3_exposure:
-            break
-        jogo = game["jogo"]
-        token = game["top3"]
-        if jogo in changed_games:
-            continue
-        if picks_by_game[jogo] in DOUBLE_TOKENS:
-            continue
-
-        old = picks_by_game[jogo]
-        picks_by_game[jogo] = token
-        if old in symbol_counts:
-            symbol_counts[old] -= 1
-        symbol_counts[token] += 1
-        changed_games.add(jogo)
-        zebra3_done += 1
-        LOGGER.info("Zebra top3 aplicada no jogo %s (utilidade=%.4f).", jogo, utility)
-
-    double_games = sorted([g["jogo"] for g in selected_doubles])
-    LOGGER.info("Duplos selecionados por ganho marginal (12 secos + 2 duplos + 0 triplos): %s", double_games)
+    LOGGER.info("Estratégia vencedora: %s", best_strategy["name"])
+    LOGGER.info("Duplos selecionados: %s", best_card["double_games"])
 
     r14_categorical = []
     r14_prob = []
@@ -351,24 +407,20 @@ def main() -> None:
     duplos = sum(1 for token in r14_categorical if token in DOUBLE_TOKENS)
     triplos = sum(1 for token in r14_categorical if token == "1X2")
 
-    top2_exposed = sum(1 for g in per_match if picks_by_game[g["jogo"]] == g["top2"] or picks_by_game[g["jogo"]] in DOUBLE_TOKENS)
-    top3_exposed = sum(1 for g in per_match if picks_by_game[g["jogo"]] == g["top3"])
-
-    mc = monte_carlo_distribution(per_match, picks_by_game)
-
     LOGGER.info("Arquitetura final: %s secos, %s duplos, %s triplos, %s picks totais", secos, duplos, triplos, total_picks)
     LOGGER.info("R14 categórico palpite: %s", r14_categorical)
     LOGGER.info("R14 probabilístico (top1/top2/top3): %s", r14_prob)
     LOGGER.info("Esperança histórica top hits por concurso: %s", expected)
     LOGGER.info(
         "Exposição estrutural: top2_expostos=%s (meta~%s), top3_secos=%s (meta~%s)",
-        top2_exposed,
+        best_card["top2_exposed"],
         2 + target_top2_exposure,
-        top3_exposed,
+        best_card["top3_exposed"],
         target_top3_exposure,
     )
-    LOGGER.info("Dispersão símbolos em secos: %s", symbol_counts)
-    LOGGER.info("Monte Carlo (20k sims): %s", mc)
+    LOGGER.info("Dispersão símbolos em secos: %s", best_card["symbol_counts"])
+    LOGGER.info("Expected hits do cartão: %.4f", exp_hits)
+    LOGGER.info("Monte Carlo (%s sims): %s", args.n_simulations, mc)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="") as handle:

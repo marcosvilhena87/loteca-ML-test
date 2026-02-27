@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import os
@@ -33,6 +34,24 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=int(os.getenv("LOTECA_N_SIMULATIONS", "200000")),
         help="Número de simulações do Monte Carlo (também lê LOTECA_N_SIMULATIONS).",
+    )
+    parser.add_argument(
+        "--n-candidates",
+        type=int,
+        default=int(os.getenv("LOTECA_N_CANDIDATES", "80")),
+        help="Quantidade de cartões candidatos por estratégia (30-200 recomendado).",
+    )
+    parser.add_argument(
+        "--quick-simulations",
+        type=int,
+        default=int(os.getenv("LOTECA_QUICK_SIMULATIONS", "5000")),
+        help="Simulações rápidas para pré-seleção dos cartões candidatos.",
+    )
+    parser.add_argument(
+        "--mc-seed",
+        type=int,
+        default=int(os.getenv("LOTECA_MC_SEED", "2025")),
+        help="Seed base do Monte Carlo para comparabilidade entre cartões.",
     )
     return parser.parse_args()
 
@@ -89,9 +108,11 @@ def apply_bayesian_position_adjustment(market_probs: Dict[str, float], pos_profi
     return renormalize(adjusted)
 
 
-def monte_carlo_distribution(per_match: List[dict], picks_by_game: Dict[int, str], n_simulations: int) -> Dict[str, float]:
+def monte_carlo_distribution(
+    per_match: List[dict], picks_by_game: Dict[int, str], n_simulations: int, seed: int
+) -> Dict[str, float]:
     bins = {f"P({k})": 0 for k in range(11, 15)}
-    rng = random.Random(2025)
+    rng = random.Random(seed)
     hits_sum = 0.0
     hits_sq_sum = 0.0
 
@@ -151,11 +172,27 @@ def run_penalty(jogo: int, token: str, picks_by_game: Dict[int, str], window: in
         return 0.0
 
     penalty = 0.0
+    run_len = 1
+    for prev in range(jogo - 1, 0, -1):
+        prev_token = picks_by_game.get(prev)
+        if prev_token != token:
+            break
+        run_len += 1
+
+    # Penalidade explosiva para sequências longas do mesmo símbolo.
+    if run_len >= 3:
+        penalty += 0.8 * (2 ** (run_len - 3))
+
     for prev in range(max(1, jogo - window), jogo):
         prev_token = picks_by_game.get(prev)
         if prev_token == token:
             penalty += 0.5
     return penalty
+
+
+def card_hash(picks_by_game: Dict[int, str]) -> str:
+    ordered = "|".join(f"{j}:{picks_by_game[j]}" for j in sorted(picks_by_game))
+    return hashlib.sha1(ordered.encode("utf-8")).hexdigest()[:12]
 
 
 def generate_card(
@@ -166,21 +203,25 @@ def generate_card(
     max_top3_zebras: int,
     lambda_top2: float,
     lambda_top3: float,
+    rng: random.Random,
+    double_top_k: int,
+    zebra_top_m: int,
 ) -> dict:
     picks_by_game = {g["jogo"]: g["top1"] for g in per_match}
 
     used_games = set()
     double_candidates = sorted(per_match, key=lambda g: g["double_score"], reverse=True)
+    double_pool = double_candidates[: max(2, double_top_k)]
     selected_doubles = []
-    for candidate in double_candidates:
+    while len(selected_doubles) < 2 and double_pool:
+        candidate = rng.choice(double_pool)
+        double_pool.remove(candidate)
         if candidate["jogo"] in used_games:
             continue
         if any(abs(candidate["jogo"] - d["jogo"]) <= 1 for d in selected_doubles):
             continue
         selected_doubles.append(candidate)
         used_games.add(candidate["jogo"])
-        if len(selected_doubles) == 2:
-            break
 
     if len(selected_doubles) < 2:
         for candidate in double_candidates:
@@ -207,6 +248,8 @@ def generate_card(
         zebra_done = 0
         zebra_cap = max_top2_zebras if zlabel == "top2" else max_top3_zebras
         candidates = sorted(per_match, key=lambda g: g[f"zebra{2 if zlabel == 'top2' else 3}_score"], reverse=True)
+        candidates = candidates[: max(1, zebra_top_m)]
+        rng.shuffle(candidates)
         for game in candidates:
             if zebra_done >= zebra_cap:
                 break
@@ -250,11 +293,16 @@ def generate_card(
 
     return {
         "picks_by_game": picks_by_game,
+        "card_hash": card_hash(picks_by_game),
         "double_games": sorted([g["jogo"] for g in selected_doubles]),
         "symbol_counts": symbol_counts,
         "top2_exposed": top2_exposed,
         "top3_exposed": top3_exposed,
     }
+
+
+def score_from_distribution(mc: Dict[str, float], eh: float) -> float:
+    return mc["P(12)"] + 2.0 * mc["P(13)"] + 5.0 * mc["P(14)"] + 0.01 * eh
 
 
 def main() -> None:
@@ -328,32 +376,70 @@ def main() -> None:
     ]
 
     evaluated = []
-    for strategy in strategies:
-        card = generate_card(
-            per_match,
-            target_top2_exposure,
-            target_top3_exposure,
-            strategy["max2"],
-            strategy["max3"],
-            strategy["l2"],
-            strategy["l3"],
-        )
-        mc = monte_carlo_distribution(per_match, card["picks_by_game"], n_simulations=args.n_simulations)
-        eh = expected_hits(per_match, card["picks_by_game"])
-        overall_score = mc["P(12)"] + 2.0 * mc["P(13)"] + 5.0 * mc["P(14)"] + 0.01 * eh
-        evaluated.append((overall_score, strategy, card, mc, eh))
+    for idx, strategy in enumerate(strategies):
+        strategy_seed = args.mc_seed + idx * 1000
+        strategy_rng = random.Random(strategy_seed)
+        candidate_count = max(1, args.n_candidates)
+        quick_n = max(100, min(args.quick_simulations, args.n_simulations))
+        quick_eval = []
+        seen_hashes = set()
+
+        for _ in range(candidate_count):
+            card = generate_card(
+                per_match,
+                target_top2_exposure,
+                target_top3_exposure,
+                min(strategy["max2"], strategy_rng.randint(0, 3)),
+                min(strategy["max3"], strategy_rng.randint(0, 3)),
+                strategy["l2"],
+                strategy["l3"],
+                rng=strategy_rng,
+                double_top_k=5,
+                zebra_top_m=strategy_rng.randint(5, 10),
+            )
+            if card["card_hash"] in seen_hashes:
+                continue
+            seen_hashes.add(card["card_hash"])
+            eh = expected_hits(per_match, card["picks_by_game"])
+            mc_quick = monte_carlo_distribution(per_match, card["picks_by_game"], n_simulations=quick_n, seed=args.mc_seed)
+            quick_eval.append((score_from_distribution(mc_quick, eh), card, eh))
+
+        if not quick_eval:
+            raise RuntimeError(f"Estratégia {strategy['name']} não gerou cartões válidos.")
+
+        quick_eval.sort(key=lambda x: x[0], reverse=True)
+        finalists = quick_eval[: min(5, len(quick_eval))]
+
+        best_full = None
+        for _, card, eh in finalists:
+            mc_full = monte_carlo_distribution(
+                per_match,
+                card["picks_by_game"],
+                n_simulations=args.n_simulations,
+                seed=args.mc_seed,
+            )
+            final_score = score_from_distribution(mc_full, eh)
+            candidate = (final_score, strategy, card, mc_full, eh)
+            if best_full is None or candidate[0] > best_full[0]:
+                best_full = candidate
+
+        assert best_full is not None
+        evaluated.append(best_full)
         LOGGER.info(
-            "Estratégia %s | score=%.6f | expected_hits=%.4f | MC=%s",
+            "Estratégia %s | best_score=%.6f | expected_hits=%.4f | MC=%s | card_hash=%s | candidatos_unicos=%s",
             strategy["name"],
-            overall_score,
-            eh,
-            mc,
+            best_full[0],
+            best_full[4],
+            best_full[3],
+            best_full[2]["card_hash"],
+            len(seen_hashes),
         )
 
     _, best_strategy, best_card, mc, exp_hits = sorted(evaluated, key=lambda x: x[0], reverse=True)[0]
     picks_by_game = best_card["picks_by_game"]
 
     LOGGER.info("Estratégia vencedora: %s", best_strategy["name"])
+    LOGGER.info("Cartão vencedor hash: %s", best_card["card_hash"])
     LOGGER.info("Duplos selecionados: %s", best_card["double_games"])
 
     r14_categorical = []

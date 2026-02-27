@@ -148,11 +148,11 @@ def monte_carlo_distribution(
     return result
 
 
-def expected_hits(per_match: List[dict], picks_by_game: Dict[int, str]) -> float:
+def expected_hits(per_match: List[dict], picks_by_game: Dict[int, str], prob_prefix: str = "prob") -> float:
     exp = 0.0
     for game in per_match:
         token = picks_by_game[game["jogo"]]
-        exp += sum(game[f"prob_{outcome}"] for outcome in OUTCOMES if outcome in token)
+        exp += sum(game[f"{prob_prefix}_{outcome}"] for outcome in OUTCOMES if outcome in token)
     return exp
 
 
@@ -309,7 +309,7 @@ def generate_card(
             else:
                 top3_soft_done += 1
 
-    top2_exposed = sum(1 for g in per_match if picks_by_game[g["jogo"]] == g["top2"] or picks_by_game[g["jogo"]] in DOUBLE_TOKENS)
+    top2_exposed = sum(1 for g in per_match if g["top2"] in picks_by_game[g["jogo"]])
     top3_exposed = sum(1 for g in per_match if picks_by_game[g["jogo"]] == g["top3"])
 
     return {
@@ -324,6 +324,18 @@ def generate_card(
 
 def score_from_distribution(mc: Dict[str, float], eh: float) -> float:
     return mc["P(12)"] + 2.0 * mc["P(13)"] + 5.0 * mc["P(14)"] + 0.01 * eh
+
+
+def combined_score(
+    mc_market: Dict[str, float],
+    eh_market: float,
+    mc_adjusted: Dict[str, float],
+    eh_adjusted: float,
+    market_weight: float = 0.7,
+) -> float:
+    market_component = score_from_distribution(mc_market, eh_market)
+    adjusted_component = score_from_distribution(mc_adjusted, eh_adjusted)
+    return market_weight * market_component + (1.0 - market_weight) * adjusted_component
 
 
 def main() -> None:
@@ -427,7 +439,8 @@ def main() -> None:
             if card["card_hash"] in seen_hashes:
                 continue
             seen_hashes.add(card["card_hash"])
-            eh = expected_hits(per_match, card["picks_by_game"])
+            eh_market = expected_hits(per_match, card["picks_by_game"], prob_prefix="market_prob")
+            eh_adjusted = expected_hits(per_match, card["picks_by_game"], prob_prefix="prob")
             mc_quick_market = monte_carlo_distribution(
                 per_match,
                 card["picks_by_game"],
@@ -442,7 +455,8 @@ def main() -> None:
                 seed=args.mc_seed,
                 prob_prefix="prob",
             )
-            quick_eval.append((score_from_distribution(mc_quick_market, eh), card, eh, mc_quick_adjusted))
+            quick_score = combined_score(mc_quick_market, eh_market, mc_quick_adjusted, eh_adjusted)
+            quick_eval.append((quick_score, card, eh_market, eh_adjusted, mc_quick_adjusted))
 
         if not quick_eval:
             raise RuntimeError(f"Estratégia {strategy['name']} não gerou cartões válidos.")
@@ -451,7 +465,7 @@ def main() -> None:
         finalists = quick_eval[: min(5, len(quick_eval))]
 
         best_full = None
-        for _, card, eh, _ in finalists:
+        for _, card, eh_market, eh_adjusted, _ in finalists:
             mc_full_market = monte_carlo_distribution(
                 per_match,
                 card["picks_by_game"],
@@ -466,24 +480,25 @@ def main() -> None:
                 seed=args.mc_seed,
                 prob_prefix="prob",
             )
-            final_score = score_from_distribution(mc_full_market, eh)
-            candidate = (final_score, strategy, card, mc_full_market, mc_full_adjusted, eh)
+            final_score = combined_score(mc_full_market, eh_market, mc_full_adjusted, eh_adjusted)
+            candidate = (final_score, strategy, card, mc_full_market, mc_full_adjusted, eh_market, eh_adjusted)
             if best_full is None or candidate[0] > best_full[0]:
                 best_full = candidate
 
         assert best_full is not None
         evaluated.append(best_full)
         LOGGER.info(
-            "Estratégia %s | best_score=%.6f | expected_hits=%.4f | MC=%s | card_hash=%s | candidatos_unicos=%s",
+            "Estratégia %s | best_score=%.6f | expected_hits_market=%.4f | expected_hits_adjusted=%.4f | MC_market=%s | card_hash=%s | candidatos_unicos=%s",
             strategy["name"],
             best_full[0],
             best_full[5],
+            best_full[6],
             best_full[3],
             best_full[2]["card_hash"],
             len(seen_hashes),
         )
 
-    _, best_strategy, best_card, mc_market, mc_adjusted, exp_hits = sorted(evaluated, key=lambda x: x[0], reverse=True)[0]
+    _, best_strategy, best_card, mc_market, mc_adjusted, exp_hits_market, exp_hits_adjusted = sorted(evaluated, key=lambda x: x[0], reverse=True)[0]
     picks_by_game = best_card["picks_by_game"]
 
     LOGGER.info("Estratégia vencedora: %s", best_strategy["name"])
@@ -553,7 +568,8 @@ def main() -> None:
         target_top3_exposure,
     )
     LOGGER.info("Dispersão símbolos em secos: %s", best_card["symbol_counts"])
-    LOGGER.info("Expected hits do cartão: %.4f", exp_hits)
+    LOGGER.info("Expected hits do cartão (market): %.4f", exp_hits_market)
+    LOGGER.info("Expected hits do cartão (adjusted): %.4f", exp_hits_adjusted)
     LOGGER.info("Monte Carlo market (%s sims): %s", args.n_simulations, mc_market)
     LOGGER.info("Monte Carlo adjusted (%s sims): %s", args.n_simulations, mc_adjusted)
 

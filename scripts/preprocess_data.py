@@ -34,12 +34,12 @@ BASE_PENALTY_WEIGHTS = {
     "top3": {
         "avg_run_length": 0.70,
         "runs_count": 0.65,
-        "avg_position": 1.35,
-        "run_share_len1": 0.55,
-        "run_share_len2": 0.50,
+        "avg_position": 1.55,
+        "run_share_len1": 0.40,
+        "run_share_len2": 0.35,
         "run_share_len3p": 0.55,
-        "first_occurrence": 1.00,
-        "last_occurrence": 1.00,
+        "first_occurrence": 1.30,
+        "last_occurrence": 1.15,
         "avg_gap": 0.95,
     },
 }

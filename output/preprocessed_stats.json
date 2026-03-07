@@ -177,12 +177,12 @@
       "top3": {
         "avg_run_length": 1.1783321457545686,
         "runs_count": 0.5585675823756481,
-        "avg_position": 0.48381417791906023,
-        "run_share_len1": 1.1757688949605696,
-        "run_share_len2": 1.2033249922179243,
+        "avg_position": 0.5554903524255876,
+        "run_share_len1": 0.8551046508804142,
+        "run_share_len2": 0.842327494552547,
         "run_share_len3p": 1.8590284167445652,
-        "first_occurrence": 0.33712151799037404,
-        "last_occurrence": 0.26162416730686194,
+        "first_occurrence": 0.4382579733874863,
+        "last_occurrence": 0.3008677924028912,
         "avg_gap": 0.40960505046579604
       }
     },

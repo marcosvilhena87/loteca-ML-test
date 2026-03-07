@@ -192,6 +192,12 @@ def main():
             "raw_weight": 0.60,
             "calibration_weight": 0.40,
             "confidence_bands": BANDS,
+            "uncertainty_heuristics": {
+                "enabled": True,
+                "top3_early_penalty": 0.09,
+                "top3_early_window": 6,
+                "top1_certainty_bonus": 0.04,
+            },
         },
         "soft_targets": preprocessed["soft_targets"],
         "base_hit_rates": preprocessed["base_hit_rates"],

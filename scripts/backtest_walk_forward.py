@@ -1,12 +1,13 @@
-import math
 import argparse
 import logging
 from statistics import mean
 
-from scripts.common import dump_json, group_by_concurso, load_csv, rank_symbols, setup_logging
+from scripts.common import dump_json, group_by_concurso, load_csv, load_json, rank_symbols, setup_logging
 from scripts.predict_results import (
+    adjust_prob,
     assign_best_for_distribution,
     improve_soft,
+    normalized_entropy,
     option_set,
     solve_count_system,
 )
@@ -38,28 +39,19 @@ def rank_symbol_map(row):
     return {1: ranked[0], 2: ranked[1], 3: ranked[2]}
 
 
-def adjust_prob_identity(raw_prob):
-    return raw_prob
-
-
-def prepare_games(rows):
+def prepare_games(rows, model):
     games = []
     for row in rows:
         game = dict(row)
         game["rank_map"] = rank_symbol_map(game)
         inv_rank = {v: k for k, v in game["rank_map"].items()}
         raw = {"1": game["p(1)"], "X": game["p(x)"], "2": game["p(2)"]}
-        adj = {symbol: adjust_prob_identity(raw[symbol]) for symbol in raw}
+        max_prob = max(raw.values())
+        adj = {symbol: adjust_prob(model, symbol, raw[symbol], max_prob) for symbol in raw}
         game["adj_rank_prob"] = {rank: adj[symbol] for symbol, rank in inv_rank.items()}
         ranked_adj = sorted(adj.values(), reverse=True)
         gap12 = max(0.0, ranked_adj[0] - ranked_adj[1])
-        total = sum(adj.values())
-        norm = [v / total for v in adj.values()]
-        entropy = 0.0
-        for p in norm:
-            if p > 0:
-                entropy -= p * math.log(p)
-        entropy /= math.log(3)
+        entropy = normalized_entropy(list(adj.values()))
         uncertainty = 0.5 * ((1.0 - min(1.0, gap12)) + entropy)
         game["uncertainty"] = {
             "gap_top1_top2": gap12,
@@ -91,6 +83,7 @@ def infer_assignment(games, model_meta, soft_targets):
             "objective": improved["objective"],
             "assignment": improved["assignment"],
             "expected": improved["expected"],
+            "soft_penalty": improved["soft_penalty"],
         }
         if best is None or candidate["objective"] > best["objective"]:
             best = candidate
@@ -115,7 +108,7 @@ def baseline_top1_hits(games):
     return hits
 
 
-def run_backtest(rows, min_train_contests):
+def run_backtest(rows, min_train_contests, base_model_meta):
     grouped = group_by_concurso(rows)
     concursos = sorted(grouped.keys(), key=concurso_sort_key)
     if len(concursos) <= min_train_contests:
@@ -134,18 +127,25 @@ def run_backtest(rows, min_train_contests):
         }
         calibration, calib_diag = build_calibration(train_rows)
         model_meta = {
-            "raw_weight": 1.0,
-            "calibration_weight": 0.0,
-            "confidence_bands": BANDS,
-            "uncertainty_heuristics": {
-                "enabled": True,
-                "top3_early_penalty": 0.09,
-                "top3_early_window": 6,
-                "top1_certainty_bonus": 0.04,
-            },
+            "raw_weight": base_model_meta.get("raw_weight", 0.60),
+            "calibration_weight": base_model_meta.get("calibration_weight", 0.40),
+            "confidence_bands": base_model_meta.get("confidence_bands", BANDS),
+            "uncertainty_heuristics": base_model_meta.get(
+                "uncertainty_heuristics",
+                {
+                    "enabled": True,
+                    "top3_early_penalty": 0.09,
+                    "top3_early_window": 6,
+                    "top1_certainty_bonus": 0.04,
+                },
+            ),
+        }
+        fold_model = {
+            "meta": model_meta,
+            "calibration": calibration,
         }
 
-        games = prepare_games(test_rows)
+        games = prepare_games(test_rows, fold_model)
         current = infer_assignment(games, model_meta, preprocessed["soft_targets"])
 
         legacy_meta = dict(model_meta)
@@ -168,8 +168,16 @@ def run_backtest(rows, min_train_contests):
                 "hits_current": hits_current,
                 "hits_previous": hits_previous,
                 "hits_top1_baseline": hits_top1,
+                "objective_current": current["objective"],
+                "expected_current": current["expected"],
+                "soft_penalty_current": current["soft_penalty"],
+                "objective_previous": previous["objective"],
+                "expected_previous": previous["expected"],
+                "soft_penalty_previous": previous["soft_penalty"],
                 "delta_vs_previous": hits_current - hits_previous,
                 "delta_vs_baseline": hits_current - hits_top1,
+                "delta_objective_vs_previous": current["objective"] - previous["objective"],
+                "delta_expected_vs_previous": current["expected"] - previous["expected"],
                 "calibration_diagnostics": calib_diag,
             }
         )
@@ -193,6 +201,10 @@ def run_backtest(rows, min_train_contests):
         },
         "mean_delta_vs_previous": mean([r["delta_vs_previous"] for r in results]),
         "mean_delta_vs_baseline": mean([r["delta_vs_baseline"] for r in results]),
+        "mean_delta_objective_vs_previous": mean([r["delta_objective_vs_previous"] for r in results]),
+        "mean_delta_expected_vs_previous": mean([r["delta_expected_vs_previous"] for r in results]),
+        "folds_with_hit_improvement": sum(1 for r in results if r["delta_vs_previous"] > 0),
+        "folds_with_objective_improvement": sum(1 for r in results if r["delta_objective_vs_previous"] > 0),
     }
 
     return {"summary": summary, "fold_results": results}
@@ -202,13 +214,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default="data/concursos_anteriores.csv")
     parser.add_argument("--output", default="output/backtest_walk_forward.json")
-    parser.add_argument("--min-train-concursos", type=int, default=30)
+    parser.add_argument("--model", default="models/model.json")
+    parser.add_argument("--min-train-concursos", type=int, default=20)
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
     setup_logging(args.log_level)
     rows = load_csv(args.input)
-    report = run_backtest(rows, args.min_train_concursos)
+    model = load_json(args.model)
+    report = run_backtest(rows, args.min_train_concursos, model.get("meta", {}))
     dump_json(args.output, report)
     LOGGER.info("Backtest walk-forward salvo em %s", args.output)
 

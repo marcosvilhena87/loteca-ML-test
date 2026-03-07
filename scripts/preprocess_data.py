@@ -3,7 +3,7 @@ import logging
 from collections import defaultdict
 from statistics import mean
 
-from scripts.common import dump_json, group_by_concurso, load_csv, run_stats, setup_logging
+from scripts.common import avg_selected_position, dump_json, group_by_concurso, load_csv, run_stats, setup_logging
 
 LOGGER = logging.getLogger(__name__)
 
@@ -19,6 +19,7 @@ def build_soft_targets(historical_games):
             ordered = sorted(games, key=lambda r: -r[prob_col])
             binary = [int(g[indicator_col]) for g in ordered]
             stats = run_stats(binary)
+            stats["avg_position"] = avg_selected_position(binary)
             metrics_per_rank[rank].append(stats)
         LOGGER.debug("Concurso %s processado para métricas de runs", concurso)
 
@@ -28,6 +29,7 @@ def build_soft_targets(historical_games):
         soft_targets[f"top{rank}"] = {
             "avg_run_length": mean(s["avg_run_length"] for s in all_stats),
             "runs_count": mean(s["runs_count"] for s in all_stats),
+            "avg_position": mean(s["avg_position"] for s in all_stats),
         }
     return soft_targets
 

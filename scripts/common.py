@@ -77,6 +77,13 @@ def run_stats(binary_list):
     return {"avg_run_length": float(avg_run_length), "runs_count": float(runs_count)}
 
 
+def avg_selected_position(binary_list):
+    positions = [i + 1 for i, value in enumerate(binary_list) if value == 1]
+    if not positions:
+        return 0.0
+    return float(mean(positions))
+
+
 def dump_json(path: str, payload):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:

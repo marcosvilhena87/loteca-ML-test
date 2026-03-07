@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from scripts.common import (
+    avg_selected_position,
     dump_json,
     load_csv,
     load_json,
@@ -36,12 +37,20 @@ def evaluate_soft_penalty(games, selected_rank_sets, soft_targets):
         ordered_indices = sorted(range(len(games)), key=lambda i: -games[i][f"p(top{rank})"])
         indicator = [1 if rank in selected_rank_sets[i] else 0 for i in ordered_indices]
         stats = run_stats(indicator)
+        stats["avg_position"] = avg_selected_position(indicator)
         target = soft_targets[f"top{rank}"]
+        target_avg_position = target.get("avg_position", 0.0)
         rank_penalty = (stats["avg_run_length"] - target["avg_run_length"]) ** 2 + (
             stats["runs_count"] - target["runs_count"]
+        ) ** 2 + (
+            stats["avg_position"] - target_avg_position
         ) ** 2
         penalty += rank_penalty
-        detail[f"top{rank}"] = {"actual": stats, "target": target, "penalty": rank_penalty}
+        detail[f"top{rank}"] = {
+            "actual": stats,
+            "target": {**target, "avg_position": target_avg_position},
+            "penalty": rank_penalty,
+        }
     return penalty, detail
 
 

@@ -1,48 +1,54 @@
 {
   "selected_distribution": {
-    "S1": 7,
+    "S1": 6,
     "S2": 2,
-    "S3": 2,
-    "D12": 2,
+    "S3": 3,
+    "D12": 3,
     "D13": 0,
-    "D23": 1
+    "D23": 0
   },
-  "objective": 6.807433912306964,
-  "expected_score": 6.87072097215246,
-  "soft_penalty": 0.37227682262056466,
+  "objective": 6.581686545710434,
+  "expected_score": 6.663309724538871,
+  "soft_penalty": 0.4801363460496304,
   "soft_detail": {
     "top1": {
       "actual": {
         "avg_run_length": 2.25,
-        "runs_count": 4.0
+        "runs_count": 4.0,
+        "avg_position": 6.333333333333333
       },
       "target": {
         "avg_run_length": 2.1455342902711325,
-        "runs_count": 3.6555023923444976
+        "runs_count": 3.6555023923444976,
+        "avg_position": 6.606157352748262
       },
-      "penalty": 0.1295916861895205
+      "penalty": 0.20402463175923813
     },
     "top2": {
       "actual": {
         "avg_run_length": 1.6666666666666667,
-        "runs_count": 3.0
+        "runs_count": 3.0,
+        "avg_position": 6.6
       },
       "target": {
         "avg_run_length": 1.4166666666666667,
-        "runs_count": 2.8157894736842106
+        "runs_count": 2.8157894736842106,
+        "avg_position": 6.782596643122959
       },
-      "penalty": 0.09643351800554013
+      "penalty": 0.1297750520853136
     },
     "top3": {
       "actual": {
         "avg_run_length": 1.5,
-        "runs_count": 2.0
+        "runs_count": 2.0,
+        "avg_position": 6.0
       },
       "target": {
         "avg_run_length": 1.2248006379585328,
-        "runs_count": 2.2655502392344498
+        "runs_count": 2.2655502392344498,
+        "avg_position": 6.009221918432445
       },
-      "penalty": 0.14625161842550405
+      "penalty": 0.1463366622050787
     }
   },
   "hard_constraints_check": {

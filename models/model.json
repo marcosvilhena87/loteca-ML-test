@@ -7,15 +7,18 @@
   "soft_targets": {
     "top1": {
       "avg_run_length": 2.1455342902711325,
-      "runs_count": 3.6555023923444976
+      "runs_count": 3.6555023923444976,
+      "avg_position": 6.606157352748262
     },
     "top2": {
       "avg_run_length": 1.4166666666666667,
-      "runs_count": 2.8157894736842106
+      "runs_count": 2.8157894736842106,
+      "avg_position": 6.782596643122959
     },
     "top3": {
       "avg_run_length": 1.2248006379585328,
-      "runs_count": 2.2655502392344498
+      "runs_count": 2.2655502392344498,
+      "avg_position": 6.009221918432445
     }
   },
   "base_hit_rates": {

@@ -1,0 +1,56 @@
+{
+  "selected_distribution": {
+    "S1": 7,
+    "S2": 2,
+    "S3": 2,
+    "D12": 2,
+    "D13": 0,
+    "D23": 1
+  },
+  "objective": 6.807433912306964,
+  "expected_score": 6.87072097215246,
+  "soft_penalty": 0.37227682262056466,
+  "soft_detail": {
+    "top1": {
+      "actual": {
+        "avg_run_length": 2.25,
+        "runs_count": 4.0
+      },
+      "target": {
+        "avg_run_length": 2.1455342902711325,
+        "runs_count": 3.6555023923444976
+      },
+      "penalty": 0.1295916861895205
+    },
+    "top2": {
+      "actual": {
+        "avg_run_length": 1.6666666666666667,
+        "runs_count": 3.0
+      },
+      "target": {
+        "avg_run_length": 1.4166666666666667,
+        "runs_count": 2.8157894736842106
+      },
+      "penalty": 0.09643351800554013
+    },
+    "top3": {
+      "actual": {
+        "avg_run_length": 1.5,
+        "runs_count": 2.0
+      },
+      "target": {
+        "avg_run_length": 1.2248006379585328,
+        "runs_count": 2.2655502392344498
+      },
+      "penalty": 0.14625161842550405
+    }
+  },
+  "hard_constraints_check": {
+    "secos": 11,
+    "duplos": 3,
+    "triplos": 0,
+    "top1": 9,
+    "top2": 5,
+    "top3": 3
+  }
+}

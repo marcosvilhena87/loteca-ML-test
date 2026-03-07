@@ -1,0 +1,187 @@
+{
+  "summary": {
+    "folds": 2,
+    "mean_hits_current": 9,
+    "mean_hits_previous": 9,
+    "mean_hits_top1_baseline": 6.5,
+    "hit_distribution_current": {
+      "0": 0,
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "4": 0,
+      "5": 0,
+      "6": 0,
+      "7": 0,
+      "8": 1,
+      "9": 0,
+      "10": 1,
+      "11": 0,
+      "12": 0,
+      "13": 0,
+      "14": 0
+    },
+    "hit_distribution_previous": {
+      "0": 0,
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "4": 0,
+      "5": 0,
+      "6": 0,
+      "7": 0,
+      "8": 1,
+      "9": 0,
+      "10": 1,
+      "11": 0,
+      "12": 0,
+      "13": 0,
+      "14": 0
+    },
+    "hit_distribution_top1_baseline": {
+      "0": 0,
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "4": 0,
+      "5": 1,
+      "6": 0,
+      "7": 0,
+      "8": 1,
+      "9": 0,
+      "10": 0,
+      "11": 0,
+      "12": 0,
+      "13": 0,
+      "14": 0
+    },
+    "mean_delta_vs_previous": 0,
+    "mean_delta_vs_baseline": 2.5
+  },
+  "fold_results": [
+    {
+      "test_concurso": 1234,
+      "train_concursos": 416,
+      "hits_current": 10,
+      "hits_previous": 10,
+      "hits_top1_baseline": 8,
+      "delta_vs_previous": 0,
+      "delta_vs_baseline": 2,
+      "calibration_diagnostics": {
+        "1": {
+          "high": {
+            "n": 1091,
+            "brier": 0.16760350830748932,
+            "method": "isotonic"
+          },
+          "mid": {
+            "n": 2341,
+            "brier": 0.2225338156725122,
+            "method": "isotonic"
+          },
+          "low": {
+            "n": 2392,
+            "brier": 0.22826377969902245,
+            "method": "isotonic"
+          }
+        },
+        "X": {
+          "high": {
+            "n": 1091,
+            "brier": 0.151048068782205,
+            "method": "isotonic"
+          },
+          "mid": {
+            "n": 2341,
+            "brier": 0.19695554312565067,
+            "method": "isotonic"
+          },
+          "low": {
+            "n": 2392,
+            "brier": 0.22169854979262052,
+            "method": "bucket"
+          }
+        },
+        "2": {
+          "high": {
+            "n": 1091,
+            "brier": 0.10221766530038147,
+            "method": "isotonic"
+          },
+          "mid": {
+            "n": 2341,
+            "brier": 0.1711119156406443,
+            "method": "isotonic"
+          },
+          "low": {
+            "n": 2392,
+            "brier": 0.20265503697907888,
+            "method": "isotonic"
+          }
+        }
+      }
+    },
+    {
+      "test_concurso": 1235,
+      "train_concursos": 417,
+      "hits_current": 8,
+      "hits_previous": 8,
+      "hits_top1_baseline": 5,
+      "delta_vs_previous": 0,
+      "delta_vs_baseline": 3,
+      "calibration_diagnostics": {
+        "1": {
+          "high": {
+            "n": 1096,
+            "brier": 0.1676898339509751,
+            "method": "isotonic"
+          },
+          "mid": {
+            "n": 2347,
+            "brier": 0.2225446274689235,
+            "method": "isotonic"
+          },
+          "low": {
+            "n": 2395,
+            "brier": 0.2281033056127739,
+            "method": "isotonic"
+          }
+        },
+        "X": {
+          "high": {
+            "n": 1096,
+            "brier": 0.1510462320713472,
+            "method": "isotonic"
+          },
+          "mid": {
+            "n": 2347,
+            "brier": 0.19698261622097976,
+            "method": "isotonic"
+          },
+          "low": {
+            "n": 2395,
+            "brier": 0.2218350692145604,
+            "method": "bucket"
+          }
+        },
+        "2": {
+          "high": {
+            "n": 1096,
+            "brier": 0.10189897182623867,
+            "method": "isotonic"
+          },
+          "mid": {
+            "n": 2347,
+            "brier": 0.1710685138788385,
+            "method": "isotonic"
+          },
+          "low": {
+            "n": 2395,
+            "brier": 0.2027094507798418,
+            "method": "isotonic"
+          }
+        }
+      }
+    }
+  ]
+}

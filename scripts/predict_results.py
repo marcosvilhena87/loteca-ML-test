@@ -35,6 +35,23 @@ def clamp_prob(p, eps=1e-6):
     return min(1.0 - eps, max(eps, p))
 
 
+def normalized_entropy(probs):
+    values = [max(1e-12, p) for p in probs]
+    total = sum(values)
+    normalized = [v / total for v in values]
+    entropy = -sum(v * math.log(v) for v in normalized)
+    return entropy / math.log(len(normalized))
+
+
+def default_uncertainty_config():
+    return {
+        "enabled": True,
+        "top3_early_penalty": 0.09,
+        "top3_early_window": 6,
+        "top1_certainty_bonus": 0.04,
+    }
+
+
 def band_of(model, max_prob):
     for name, (low, high) in model["meta"]["confidence_bands"].items():
         if low <= max_prob < high:
@@ -160,8 +177,11 @@ def option_set(option):
     }[option]
 
 
-def assign_best_for_distribution(games, counts):
+def assign_best_for_distribution(games, counts, uncertainty_config=None):
     option_names = ["S1", "S2", "S3", "D12", "D13", "D23"]
+    cfg = default_uncertainty_config()
+    if uncertainty_config:
+        cfg.update(uncertainty_config)
 
     @lru_cache(maxsize=None)
     def dp(i, c1, c2, c3, c12, c13, c23):
@@ -179,6 +199,16 @@ def assign_best_for_distribution(games, counts):
             rs = option_set(opt)
             game = games[i]
             option_score = sum(game["adj_rank_prob"][r] for r in rs)
+
+            if cfg.get("enabled", True):
+                certainty = game["uncertainty"]["certainty"]
+                if 3 in rs:
+                    early_window = max(1, int(cfg.get("top3_early_window", 6)))
+                    top3_pos = game["uncertainty"]["top3_position"]
+                    early_factor = max(0.0, (early_window - top3_pos + 1) / early_window)
+                    option_score -= cfg.get("top3_early_penalty", 0.09) * certainty * early_factor
+                if 1 in rs:
+                    option_score += cfg.get("top1_certainty_bonus", 0.04) * certainty
             new_remaining = remaining.copy()
             new_remaining[idx] -= 1
             future_score, future_plan = dp(i + 1, *new_remaining)
@@ -335,12 +365,31 @@ def main():
         adj = {symbol: adjust_prob(model, symbol, raw[symbol], max_prob) for symbol in raw}
         game["adj_rank_prob"] = {rank: adj[symbol] for symbol, rank in inv_rank.items()}
 
+        ranked_adj = sorted(adj.values(), reverse=True)
+        gap12 = max(0.0, ranked_adj[0] - ranked_adj[1])
+        entropy = normalized_entropy(list(adj.values()))
+        uncertainty = 0.5 * ((1.0 - min(1.0, gap12)) + entropy)
+        game["uncertainty"] = {
+            "gap_top1_top2": gap12,
+            "entropy": entropy,
+            "certainty": 1.0 - uncertainty,
+            "top3_position": 0,
+        }
+
+    top3_sorted = sorted(range(len(games)), key=lambda i: -games[i]["p(top3)"])
+    for pos, idx in enumerate(top3_sorted, start=1):
+        games[idx]["uncertainty"]["top3_position"] = pos
+
     distributions = solve_count_system()
     LOGGER.info("Distribuições viáveis encontradas: %s", len(distributions))
 
     best = None
     for dist in distributions:
-        base_score, base_assignment = assign_best_for_distribution(games, dist)
+        base_score, base_assignment = assign_best_for_distribution(
+            games,
+            dist,
+            model.get("meta", {}).get("uncertainty_heuristics", {}),
+        )
         improved = improve_soft(
             games,
             base_assignment,
@@ -383,6 +432,7 @@ def main():
         "selection_meta": best["selection_meta"],
         "hard_constraints_check": assignment_counts,
         "calibration_diagnostics": model.get("calibration_diagnostics", {}),
+        "uncertainty_heuristics": model.get("meta", {}).get("uncertainty_heuristics", {}),
     }
     dump_json(args.debug_output, debug_payload)
     LOGGER.info("Predições salvas em %s", args.output)

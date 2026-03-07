@@ -33,10 +33,10 @@ BASE_PENALTY_WEIGHTS = {
     },
     "top3": {
         "avg_run_length": 0.70,
-        "runs_count": 0.85,
+        "runs_count": 0.65,
         "avg_position": 1.35,
-        "run_share_len1": 0.80,
-        "run_share_len2": 0.70,
+        "run_share_len1": 0.55,
+        "run_share_len2": 0.50,
         "run_share_len3p": 0.55,
         "first_occurrence": 1.00,
         "last_occurrence": 1.00,
@@ -94,6 +94,10 @@ def build_soft_targets(historical_games):
         "targets": soft_targets,
         "metric_summary": rank_summary,
         "metric_weights": _build_rank_penalty_weights(rank_summary),
+        "normalization": "weighted_mean_std",
+        "std_epsilon": 0.05,
+        "global_coefficient": 0.12,
+        "expected_tolerance": 0.10,
     }
 
 

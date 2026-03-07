@@ -1,11 +1,72 @@
 import argparse
 import logging
 from collections import defaultdict
-from statistics import mean
+from statistics import mean, pstdev
 
-from scripts.common import avg_selected_position, dump_json, group_by_concurso, load_csv, run_stats, setup_logging
+from scripts.common import dump_json, group_by_concurso, load_csv, rank_structure_stats, setup_logging
 
 LOGGER = logging.getLogger(__name__)
+
+
+BASE_PENALTY_WEIGHTS = {
+    "top1": {
+        "avg_run_length": 1.25,
+        "runs_count": 1.15,
+        "avg_position": 1.10,
+        "run_share_len1": 0.60,
+        "run_share_len2": 0.60,
+        "run_share_len3p": 0.50,
+        "first_occurrence": 0.55,
+        "last_occurrence": 0.55,
+        "avg_gap": 0.50,
+    },
+    "top2": {
+        "avg_run_length": 0.95,
+        "runs_count": 1.00,
+        "avg_position": 1.00,
+        "run_share_len1": 0.70,
+        "run_share_len2": 0.70,
+        "run_share_len3p": 0.60,
+        "first_occurrence": 0.65,
+        "last_occurrence": 0.65,
+        "avg_gap": 0.60,
+    },
+    "top3": {
+        "avg_run_length": 0.70,
+        "runs_count": 0.85,
+        "avg_position": 1.35,
+        "run_share_len1": 0.80,
+        "run_share_len2": 0.70,
+        "run_share_len3p": 0.55,
+        "first_occurrence": 1.00,
+        "last_occurrence": 1.00,
+        "avg_gap": 0.95,
+    },
+}
+
+
+def _mean_and_std(stats_list):
+    metrics = stats_list[0].keys()
+    out = {}
+    for metric in metrics:
+        vals = [s[metric] for s in stats_list]
+        out[metric] = {
+            "mean": float(mean(vals)),
+            "std": float(pstdev(vals)) if len(vals) > 1 else 0.0,
+        }
+    return out
+
+
+def _build_rank_penalty_weights(summary):
+    weights = {}
+    for rank in (1, 2, 3):
+        label = f"top{rank}"
+        weights[label] = {}
+        for metric, stats in summary[label].items():
+            stability_scale = 1.0 / (stats["std"] + 0.15)
+            base = BASE_PENALTY_WEIGHTS[label].get(metric, 0.5)
+            weights[label][metric] = float(base * stability_scale)
+    return weights
 
 
 def build_soft_targets(historical_games):
@@ -18,20 +79,22 @@ def build_soft_targets(historical_games):
             indicator_col = f"top{rank}"
             ordered = sorted(games, key=lambda r: -r[prob_col])
             binary = [int(g[indicator_col]) for g in ordered]
-            stats = run_stats(binary)
-            stats["avg_position"] = avg_selected_position(binary)
+            stats = rank_structure_stats(binary)
             metrics_per_rank[rank].append(stats)
-        LOGGER.debug("Concurso %s processado para métricas de runs", concurso)
+        LOGGER.debug("Concurso %s processado para métricas estruturais", concurso)
 
+    rank_summary = {}
     soft_targets = {}
     for rank in (1, 2, 3):
-        all_stats = metrics_per_rank[rank]
-        soft_targets[f"top{rank}"] = {
-            "avg_run_length": mean(s["avg_run_length"] for s in all_stats),
-            "runs_count": mean(s["runs_count"] for s in all_stats),
-            "avg_position": mean(s["avg_position"] for s in all_stats),
-        }
-    return soft_targets
+        label = f"top{rank}"
+        rank_summary[label] = _mean_and_std(metrics_per_rank[rank])
+        soft_targets[label] = {metric: data["mean"] for metric, data in rank_summary[label].items()}
+
+    return {
+        "targets": soft_targets,
+        "metric_summary": rank_summary,
+        "metric_weights": _build_rank_penalty_weights(rank_summary),
+    }
 
 
 def build_hit_rates(historical_games):

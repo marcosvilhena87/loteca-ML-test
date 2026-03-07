@@ -81,30 +81,44 @@ def evaluate_soft_penalty(games, selected_rank_sets, soft_config):
     detail = {}
     targets = soft_config["targets"]
     metric_weights = soft_config["metric_weights"]
+    metric_summary = soft_config.get("metric_summary", {})
+    std_eps = soft_config.get("std_epsilon", 0.05)
 
     for rank in (1, 2, 3):
+        rank_label = f"top{rank}"
         ordered_indices = sorted(range(len(games)), key=lambda i: -games[i][f"p(top{rank})"])
         indicator = [1 if rank in selected_rank_sets[i] else 0 for i in ordered_indices]
         stats = rank_structure_stats(indicator)
-        target = targets[f"top{rank}"]
+        target = targets[rank_label]
+        rank_metric_weights = metric_weights[rank_label]
+        rank_metric_summary = metric_summary.get(rank_label, {})
 
-        rank_penalty = 0.0
+        weighted_penalty_sum = 0.0
+        total_weight = 0.0
         metric_breakdown = {}
-        for metric, weight in metric_weights[f"top{rank}"].items():
-            delta = abs(stats.get(metric, 0.0) - target.get(metric, 0.0))
-            metric_penalty = weight * delta
-            rank_penalty += metric_penalty
+        for metric, weight in rank_metric_weights.items():
+            delta_abs = abs(stats.get(metric, 0.0) - target.get(metric, 0.0))
+            std = rank_metric_summary.get(metric, {}).get("std", 0.0)
+            delta_std = delta_abs / (std + std_eps)
+            metric_penalty = weight * delta_std
+            weighted_penalty_sum += metric_penalty
+            total_weight += weight
             metric_breakdown[metric] = {
                 "weight": weight,
-                "delta": delta,
+                "delta_abs": delta_abs,
+                "delta_std": delta_std,
+                "std": std,
                 "penalty": metric_penalty,
             }
 
+        rank_penalty = weighted_penalty_sum / total_weight if total_weight > 0 else 0.0
         penalty += rank_penalty
-        detail[f"top{rank}"] = {
+        detail[rank_label] = {
             "actual": stats,
             "target": target,
             "metrics": metric_breakdown,
+            "weighted_penalty_sum": weighted_penalty_sum,
+            "total_weight": total_weight,
             "penalty": rank_penalty,
         }
     return penalty, detail
@@ -188,12 +202,14 @@ def assign_best_for_distribution(games, counts):
 
 def improve_soft(games, assignment, soft_targets, max_iter=1000, n_starts=8):
     option_to_set = {name: option_set(name) for name in ["S1", "S2", "S3", "D12", "D13", "D23"]}
+    global_coefficient = soft_targets.get("global_coefficient", 0.12)
+    expected_tolerance = soft_targets.get("expected_tolerance", 0.10)
 
     def objective(local_assignment):
         rank_sets = [option_to_set[opt] for opt in local_assignment]
         expected = sum(sum(games[i]["adj_rank_prob"][r] for r in rank_sets[i]) for i in range(len(games)))
         soft_penalty, detail = evaluate_soft_penalty(games, rank_sets, soft_targets)
-        total = expected - 0.12 * soft_penalty
+        total = expected - global_coefficient * soft_penalty
         return total, expected, soft_penalty, detail
 
     def local_search(seed_assignment):
@@ -220,19 +236,33 @@ def improve_soft(games, assignment, soft_targets, max_iter=1000, n_starts=8):
                     break
             if not improved:
                 break
-        return best, best_expected, best_penalty, best_detail, best_obj
+        return {
+            "assignment": best,
+            "expected": best_expected,
+            "soft_penalty": best_penalty,
+            "soft_detail": best_detail,
+            "objective": best_obj,
+        }
 
-    best_global = None
+    candidates = []
     for start in range(n_starts):
         seed = assignment[:]
         if start > 0:
             for _ in range(start * 3):
                 i, j = random.sample(range(len(seed)), 2)
                 seed[i], seed[j] = seed[j], seed[i]
-        candidate = local_search(seed)
-        if best_global is None or candidate[4] > best_global[4]:
-            best_global = candidate
+        candidates.append(local_search(seed))
 
+    best_expected = max(c["expected"] for c in candidates)
+    near_optimal = [c for c in candidates if c["expected"] >= best_expected - expected_tolerance]
+    best_global = min(near_optimal, key=lambda c: c["soft_penalty"])
+    best_global["selection_meta"] = {
+        "best_expected_seen": best_expected,
+        "expected_tolerance": expected_tolerance,
+        "near_optimal_candidates": len(near_optimal),
+        "total_candidates": len(candidates),
+        "global_coefficient": global_coefficient,
+    }
     return best_global
 
 
@@ -311,7 +341,7 @@ def main():
     best = None
     for dist in distributions:
         base_score, base_assignment = assign_best_for_distribution(games, dist)
-        improved_assignment, expected, soft_penalty, soft_detail, objective = improve_soft(
+        improved = improve_soft(
             games,
             base_assignment,
             model["soft_targets"],
@@ -319,11 +349,12 @@ def main():
         candidate = {
             "distribution": dist,
             "base_score": base_score,
-            "expected_score": expected,
-            "soft_penalty": soft_penalty,
-            "objective": objective,
-            "assignment": improved_assignment,
-            "soft_detail": soft_detail,
+            "expected_score": improved["expected"],
+            "soft_penalty": improved["soft_penalty"],
+            "objective": improved["objective"],
+            "assignment": improved["assignment"],
+            "soft_detail": improved["soft_detail"],
+            "selection_meta": improved["selection_meta"],
         }
         if best is None or candidate["objective"] > best["objective"]:
             best = candidate
@@ -349,6 +380,7 @@ def main():
         "expected_score": best["expected_score"],
         "soft_penalty": best["soft_penalty"],
         "soft_detail": best["soft_detail"],
+        "selection_meta": best["selection_meta"],
         "hard_constraints_check": assignment_counts,
         "calibration_diagnostics": model.get("calibration_diagnostics", {}),
     }

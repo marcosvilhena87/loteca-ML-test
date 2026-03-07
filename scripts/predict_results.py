@@ -2,18 +2,13 @@ import argparse
 import csv
 import itertools
 import logging
+import math
+import random
+from bisect import bisect_right
 from functools import lru_cache
 from pathlib import Path
 
-from scripts.common import (
-    avg_selected_position,
-    dump_json,
-    load_csv,
-    load_json,
-    rank_symbols,
-    run_stats,
-    setup_logging,
-)
+from scripts.common import dump_json, load_csv, load_json, rank_structure_stats, rank_symbols, setup_logging
 
 LOGGER = logging.getLogger(__name__)
 
@@ -23,32 +18,93 @@ def rank_symbol_map(row):
     return {1: ranked[0], 2: ranked[1], 3: ranked[2]}
 
 
-def adjust_prob(model, symbol, raw_prob):
-    n_buckets = model["meta"]["n_buckets"]
-    bucket = min(int(raw_prob * n_buckets), n_buckets - 1)
-    calibration = model["calibration"][symbol][str(bucket)]
-    return model["meta"]["raw_weight"] * raw_prob + model["meta"]["calibration_weight"] * calibration
+def bucket_id(value, n_buckets=10):
+    idx = int(value * n_buckets)
+    return min(idx, n_buckets - 1)
 
 
-def evaluate_soft_penalty(games, selected_rank_sets, soft_targets):
+def sigmoid(z):
+    if z >= 0:
+        ez = math.exp(-z)
+        return 1.0 / (1.0 + ez)
+    ez = math.exp(z)
+    return ez / (1.0 + ez)
+
+
+def clamp_prob(p, eps=1e-6):
+    return min(1.0 - eps, max(eps, p))
+
+
+def band_of(model, max_prob):
+    for name, (low, high) in model["meta"]["confidence_bands"].items():
+        if low <= max_prob < high:
+            return name
+    return "low"
+
+
+def apply_calibrator(calibrator, x):
+    t = calibrator.get("type", "identity")
+    if t == "identity":
+        return x
+    if t == "constant":
+        return calibrator["value"]
+    if t == "bucket":
+        b = bucket_id(x, calibrator["n_buckets"])
+        return calibrator["values"][b]
+    if t == "isotonic":
+        idx = bisect_right(calibrator["thresholds"], x)
+        idx = min(idx, len(calibrator["values"]) - 1)
+        return calibrator["values"][idx]
+    if t == "platt":
+        x2 = math.log(clamp_prob(x) / (1.0 - clamp_prob(x)))
+        z = calibrator["weights"][0] + calibrator["weights"][1] * x2
+        return sigmoid(z)
+    if t == "beta":
+        z = (
+            calibrator["weights"][0]
+            + calibrator["weights"][1] * math.log(clamp_prob(x))
+            + calibrator["weights"][2] * math.log(1.0 - clamp_prob(x))
+        )
+        return sigmoid(z)
+    return x
+
+
+def adjust_prob(model, symbol, raw_prob, max_prob):
+    band = band_of(model, max_prob)
+    calibrator = model["calibration"][symbol][band]
+    calibrated = apply_calibrator(calibrator, raw_prob)
+    return model["meta"]["raw_weight"] * raw_prob + model["meta"]["calibration_weight"] * calibrated
+
+
+def evaluate_soft_penalty(games, selected_rank_sets, soft_config):
     penalty = 0.0
     detail = {}
+    targets = soft_config["targets"]
+    metric_weights = soft_config["metric_weights"]
+
     for rank in (1, 2, 3):
         ordered_indices = sorted(range(len(games)), key=lambda i: -games[i][f"p(top{rank})"])
         indicator = [1 if rank in selected_rank_sets[i] else 0 for i in ordered_indices]
-        stats = run_stats(indicator)
-        stats["avg_position"] = avg_selected_position(indicator)
-        target = soft_targets[f"top{rank}"]
-        target_avg_position = target.get("avg_position", 0.0)
-        rank_penalty = (stats["avg_run_length"] - target["avg_run_length"]) ** 2 + (
-            stats["runs_count"] - target["runs_count"]
-        ) ** 2 + (
-            stats["avg_position"] - target_avg_position
-        ) ** 2
+        stats = rank_structure_stats(indicator)
+        target = targets[f"top{rank}"]
+
+        rank_penalty = 0.0
+        metric_breakdown = {}
+        for metric, weight in metric_weights[f"top{rank}"].items():
+            delta = abs(stats.get(metric, 0.0) - target.get(metric, 0.0))
+            metric_penalty = weight * delta
+            rank_penalty += metric_penalty
+            metric_breakdown[metric] = {
+                "weight": weight,
+                "delta": delta,
+                "penalty": metric_penalty,
+            }
+
         penalty += rank_penalty
         detail[f"top{rank}"] = {
             "actual": stats,
-            "target": {**target, "avg_position": target_avg_position},
+            "target": target,
+            "metrics": metric_breakdown,
             "penalty": rank_penalty,
         }
     return penalty, detail
@@ -130,41 +186,54 @@ def assign_best_for_distribution(games, counts):
     return score, plan
 
 
-def improve_soft(games, assignment, soft_targets, max_iter=1500):
+def improve_soft(games, assignment, soft_targets, max_iter=1000, n_starts=8):
     option_to_set = {name: option_set(name) for name in ["S1", "S2", "S3", "D12", "D13", "D23"]}
 
     def objective(local_assignment):
         rank_sets = [option_to_set[opt] for opt in local_assignment]
         expected = sum(sum(games[i]["adj_rank_prob"][r] for r in rank_sets[i]) for i in range(len(games)))
         soft_penalty, detail = evaluate_soft_penalty(games, rank_sets, soft_targets)
-        total = expected - 0.17 * soft_penalty
+        total = expected - 0.12 * soft_penalty
         return total, expected, soft_penalty, detail
 
-    best = assignment[:]
-    best_obj, best_expected, best_penalty, best_detail = objective(best)
-
-    n = len(best)
-    for _ in range(max_iter):
-        improved = False
-        for i, j in itertools.combinations(range(n), 2):
-            if best[i] == best[j]:
-                continue
-            candidate = best[:]
-            candidate[i], candidate[j] = candidate[j], candidate[i]
-            cand_obj, cand_expected, cand_penalty, cand_detail = objective(candidate)
-            if cand_obj > best_obj + 1e-12:
-                best = candidate
-                best_obj, best_expected, best_penalty, best_detail = (
-                    cand_obj,
-                    cand_expected,
-                    cand_penalty,
-                    cand_detail,
-                )
-                improved = True
+    def local_search(seed_assignment):
+        best = seed_assignment[:]
+        best_obj, best_expected, best_penalty, best_detail = objective(best)
+        n = len(best)
+        for _ in range(max_iter):
+            improved = False
+            for i, j in itertools.combinations(range(n), 2):
+                if best[i] == best[j]:
+                    continue
+                candidate = best[:]
+                candidate[i], candidate[j] = candidate[j], candidate[i]
+                cand_obj, cand_expected, cand_penalty, cand_detail = objective(candidate)
+                if cand_obj > best_obj + 1e-12:
+                    best = candidate
+                    best_obj, best_expected, best_penalty, best_detail = (
+                        cand_obj,
+                        cand_expected,
+                        cand_penalty,
+                        cand_detail,
+                    )
+                    improved = True
+                    break
+            if not improved:
                 break
-        if not improved:
-            break
-    return best, best_expected, best_penalty, best_detail, best_obj
+        return best, best_expected, best_penalty, best_detail, best_obj
+
+    best_global = None
+    for start in range(n_starts):
+        seed = assignment[:]
+        if start > 0:
+            for _ in range(start * 3):
+                i, j = random.sample(range(len(seed)), 2)
+                seed[i], seed[j] = seed[j], seed[i]
+        candidate = local_search(seed)
+        if best_global is None or candidate[4] > best_global[4]:
+            best_global = candidate
+
+    return best_global
 
 
 def ranks_to_bet(rank_set, rank_map):
@@ -224,6 +293,7 @@ def main():
     args = parser.parse_args()
 
     setup_logging(args.log_level)
+    random.seed(42)
     games = load_csv(args.input)
     model = load_json(args.model)
 
@@ -231,7 +301,8 @@ def main():
         game["rank_map"] = rank_symbol_map(game)
         inv_rank = {v: k for k, v in game["rank_map"].items()}
         raw = {"1": game["p(1)"], "X": game["p(x)"], "2": game["p(2)"]}
-        adj = {symbol: adjust_prob(model, symbol, raw[symbol]) for symbol in raw}
+        max_prob = max(raw.values())
+        adj = {symbol: adjust_prob(model, symbol, raw[symbol], max_prob) for symbol in raw}
         game["adj_rank_prob"] = {rank: adj[symbol] for symbol, rank in inv_rank.items()}
 
     distributions = solve_count_system()
@@ -279,6 +350,7 @@ def main():
         "soft_penalty": best["soft_penalty"],
         "soft_detail": best["soft_detail"],
         "hard_constraints_check": assignment_counts,
+        "calibration_diagnostics": model.get("calibration_diagnostics", {}),
     }
     dump_json(args.debug_output, debug_payload)
     LOGGER.info("Predições salvas em %s", args.output)

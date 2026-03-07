@@ -84,6 +84,48 @@ def avg_selected_position(binary_list):
     return float(mean(positions))
 
 
+def rank_structure_stats(binary_list):
+    run_lengths = []
+    current = 0
+    for v in binary_list:
+        if v == 1:
+            current += 1
+        elif current:
+            run_lengths.append(current)
+            current = 0
+    if current:
+        run_lengths.append(current)
+
+    stats = run_stats(binary_list)
+    stats["avg_position"] = avg_selected_position(binary_list)
+
+    total_runs = len(run_lengths)
+    if total_runs:
+        stats["run_share_len1"] = sum(1 for r in run_lengths if r == 1) / total_runs
+        stats["run_share_len2"] = sum(1 for r in run_lengths if r == 2) / total_runs
+        stats["run_share_len3p"] = sum(1 for r in run_lengths if r >= 3) / total_runs
+    else:
+        stats["run_share_len1"] = 0.0
+        stats["run_share_len2"] = 0.0
+        stats["run_share_len3p"] = 0.0
+
+    positions = [i + 1 for i, value in enumerate(binary_list) if value == 1]
+    if positions:
+        stats["first_occurrence"] = float(min(positions))
+        stats["last_occurrence"] = float(max(positions))
+        if len(positions) >= 2:
+            gaps = [positions[i + 1] - positions[i] for i in range(len(positions) - 1)]
+            stats["avg_gap"] = float(mean(gaps))
+        else:
+            stats["avg_gap"] = 0.0
+    else:
+        stats["first_occurrence"] = 0.0
+        stats["last_occurrence"] = 0.0
+        stats["avg_gap"] = 0.0
+
+    return stats
+
+
 def dump_json(path: str, payload):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:

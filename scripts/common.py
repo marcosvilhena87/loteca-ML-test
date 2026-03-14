@@ -87,7 +87,7 @@ def run_features(binary: List[int]) -> Dict[str, float]:
 
     avg_len = sum(length for _, length in runs) / len(runs)
     avg_count = float(len(runs))
-    avg_pos = sum((start + 1) for start, _ in runs) / len(runs)
+    avg_pos = sum((start + 1) + ((length - 1) / 2) for start, length in runs) / len(runs)
     return {
         "avg_run_length": avg_len,
         "avg_run_count": avg_count,

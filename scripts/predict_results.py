@@ -263,6 +263,7 @@ def predict(next_path: str, model_path: str, output_path: str) -> Dict[str, obje
         base_score, assignment = best_assignment_for_config(jogos, config)
         if not assignment:
             continue
+        initial_score = state_score(jogos, assignment, targets, penalty_weight=search["soft_penalty_weight"])
         improved, debug = local_search(
             jogos,
             assignment,
@@ -271,8 +272,13 @@ def predict(next_path: str, model_path: str, output_path: str) -> Dict[str, obje
             iterations=search["local_search_iterations"],
             seed=search["random_seed"],
         )
+        improved_score = state_score(jogos, improved, targets, penalty_weight=search["soft_penalty_weight"])
         debug["config"] = config
         debug["initial_base_score"] = base_score
+        debug["initial_structural_penalty"] = initial_score["structural_penalty"]
+        debug["final_base_score"] = improved_score["base_score"]
+        debug["final_structural_penalty"] = improved_score["structural_penalty"]
+        debug["final_vs_initial_is_better"] = is_better_state(improved_score, initial_score)
 
         if best_debug is None or debug["objective"] > best_debug["objective"]:
             best_global = improved
@@ -302,6 +308,13 @@ def predict(next_path: str, model_path: str, output_path: str) -> Dict[str, obje
 
     counts = compute_counts(best_global)
     logging.info("Hard constraints obtidas: %s", counts)
+    if search["soft_penalty_weight"] == 0 and best_debug["final_base_score"] < best_debug["initial_base_score"] - BASE_SCORE_TIE_EPSILON:
+        logging.error(
+            "Sanity check falhou para configuração vencedora: final_base_score=%.6f < initial_base_score-%.2f (%.6f)",
+            best_debug["final_base_score"],
+            BASE_SCORE_TIE_EPSILON,
+            best_debug["initial_base_score"] - BASE_SCORE_TIE_EPSILON,
+        )
     logging.info("Debug busca: %s", best_debug)
 
     metrics_debug = {

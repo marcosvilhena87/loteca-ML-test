@@ -1,0 +1,44 @@
+{
+  "version": "1.0",
+  "hard_constraints": {
+    "top1": 8,
+    "top2": 5,
+    "top3": 4,
+    "secos": 11,
+    "duplos": 3,
+    "triplos": 0
+  },
+  "soft_targets": {
+    "top1": {
+      "avg_run_length": 2.143436754176611,
+      "avg_run_count": 3.613365155131265,
+      "avg_run_position": 6.544749403341289
+    },
+    "top2": {
+      "avg_run_length": 1.3519490851233094,
+      "avg_run_count": 2.7661097852028638,
+      "avg_run_position": 6.64005568814638
+    },
+    "top3": {
+      "avg_run_length": 1.267024661893397,
+      "avg_run_count": 2.39618138424821,
+      "avg_run_position": 5.813882259347653
+    }
+  },
+  "historical_stats": {
+    "rank_distribution": {
+      "top1": 0.5139788612342312,
+      "top2": 0.26508694169792024,
+      "top3": 0.22093419706784861
+    },
+    "avg_margin_top12": 0.22390672487930446,
+    "avg_margin_top23": 0.05311595915888169,
+    "n_rows": 5866,
+    "n_concursos": 419
+  },
+  "search": {
+    "soft_penalty_weight": 0.35,
+    "local_search_iterations": 8000,
+    "random_seed": 42
+  }
+}

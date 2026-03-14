@@ -16,6 +16,8 @@ OPTION_RANKS = {
     "23": (2, 3),
 }
 
+BASE_SCORE_TIE_EPSILON = 0.02
+
 
 def option_base_score(prob: Dict[str, float], option: str) -> float:
     return sum(prob[f"top{rank}"] for rank in OPTION_RANKS[option])
@@ -66,6 +68,64 @@ def soft_penalty(jogos: List[Dict[str, object]], assignments: List[str], targets
         penalty += abs(m["avg_run_count"] - target["avg_run_count"])
         penalty += abs(m["avg_run_position"] - target["avg_run_position"])
     return penalty
+
+
+def run_guardrails(targets: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+    guardrails = {}
+    for rank_idx in (1, 2, 3):
+        rank = f"top{rank_idx}"
+        target = targets[rank]
+        guardrails[rank] = {
+            "max_avg_run_length": target["avg_run_length"] + 1.25,
+            "min_avg_run_count": max(0.5, target["avg_run_count"] - 1.25),
+        }
+    return guardrails
+
+
+def structural_run_penalty(
+    jogos: List[Dict[str, object]],
+    assignments: List[str],
+    targets: Dict[str, Dict[str, float]],
+) -> float:
+    penalty = 0.0
+    guardrails = run_guardrails(targets)
+    for rank_idx in (1, 2, 3):
+        rank = f"top{rank_idx}"
+        metrics = rank_binary_metrics(jogos, assignments, rank_idx)
+        max_len = guardrails[rank]["max_avg_run_length"]
+        min_count = guardrails[rank]["min_avg_run_count"]
+
+        if metrics["avg_run_length"] > max_len:
+            penalty += metrics["avg_run_length"] - max_len
+        if metrics["avg_run_count"] < min_count:
+            penalty += min_count - metrics["avg_run_count"]
+    return penalty
+
+
+def state_score(
+    jogos: List[Dict[str, object]],
+    state: List[str],
+    targets: Dict[str, Dict[str, float]],
+    penalty_weight: float,
+) -> Dict[str, float]:
+    base = sum(option_base_score(jogos[i]["_top_probs"], state[i]) for i in range(len(state)))
+    structural = structural_run_penalty(jogos, state, targets)
+    return {
+        "base_score": base,
+        "structural_penalty": structural,
+        "objective": base - penalty_weight * structural,
+    }
+
+
+def is_better_state(candidate: Dict[str, float], reference: Dict[str, float]) -> bool:
+    if candidate["base_score"] > reference["base_score"] + BASE_SCORE_TIE_EPSILON:
+        return True
+    if abs(candidate["base_score"] - reference["base_score"]) <= BASE_SCORE_TIE_EPSILON:
+        if candidate["structural_penalty"] < reference["structural_penalty"]:
+            return True
+        if candidate["structural_penalty"] == reference["structural_penalty"]:
+            return candidate["objective"] > reference["objective"]
+    return False
 
 
 def feasible_type_configs() -> List[Dict[str, int]]:
@@ -129,15 +189,10 @@ def local_search(
 ) -> Tuple[List[str], Dict[str, float]]:
     rnd = random.Random(seed)
 
-    def objective(state: List[str]) -> float:
-        base = sum(option_base_score(jogos[i]["_top_probs"], state[i]) for i in range(len(state)))
-        pen = soft_penalty(jogos, state, targets)
-        return base - penalty_weight * pen
-
     best = list(assignments)
     current = list(assignments)
-    best_obj = objective(best)
-    current_obj = best_obj
+    best_score = state_score(jogos, best, targets, penalty_weight)
+    current_score = dict(best_score)
 
     for _ in range(iterations):
         i, j = rnd.sample(range(len(current)), 2)
@@ -145,19 +200,20 @@ def local_search(
             continue
         candidate = list(current)
         candidate[i], candidate[j] = candidate[j], candidate[i]
-        cand_obj = objective(candidate)
+        cand_score = state_score(jogos, candidate, targets, penalty_weight)
 
-        if cand_obj >= current_obj or rnd.random() < 0.02:
+        if is_better_state(cand_score, current_score) or rnd.random() < 0.02:
             current = candidate
-            current_obj = cand_obj
-            if cand_obj > best_obj:
+            current_score = cand_score
+            if is_better_state(cand_score, best_score):
                 best = candidate
-                best_obj = cand_obj
+                best_score = cand_score
 
     debug = {
-        "objective": best_obj,
-        "base_score": sum(option_base_score(jogos[i]["_top_probs"], best[i]) for i in range(len(best))),
-        "soft_penalty": soft_penalty(jogos, best, targets),
+        "objective": best_score["objective"],
+        "base_score": best_score["base_score"],
+        "structural_penalty": best_score["structural_penalty"],
+        "legacy_soft_penalty": soft_penalty(jogos, best, targets),
     }
     return best, debug
 

@@ -9,6 +9,10 @@ from scripts.common import detect_hit_rank, enrich_probabilities, read_csv_semic
 from scripts.predict_results import best_assignment_for_config, feasible_type_configs, local_search
 from scripts.preprocess_data import preprocess
 
+BACKTEST_WINDOWS = [20, 50, 100]
+WALK_FORWARD_TRAIN_WINDOW = 50
+WALK_FORWARD_STEPS = 20
+
 
 def resolve_result_symbol(row: Dict[str, str]) -> str:
     if row.get("1", "0") == "1":
@@ -36,6 +40,67 @@ def option_symbols(option: str, top_symbols: Dict[str, str]) -> List[str]:
     return ["1", "X", "2"]
 
 
+def evaluate_concurso(
+    jogos_ordenados: List[Dict[str, object]],
+    targets: Dict[str, Dict[str, float]],
+    penalty_weight: float,
+    iterations: int,
+    seed: int,
+) -> int:
+    configs = feasible_type_configs()
+    best_global = None
+    best_obj = None
+
+    for config in configs:
+        if sum(config.values()) != len(jogos_ordenados):
+            continue
+
+        _, assignment = best_assignment_for_config(jogos_ordenados, config)
+        if not assignment:
+            continue
+
+        improved, debug = local_search(
+            jogos_ordenados,
+            assignment,
+            targets,
+            penalty_weight=penalty_weight,
+            iterations=iterations,
+            seed=seed,
+        )
+
+        if best_obj is None or debug["objective"] > best_obj:
+            best_obj = debug["objective"]
+            best_global = improved
+
+    if best_global is None:
+        return -1
+
+    hits = 0
+    for i, jogo in enumerate(jogos_ordenados):
+        result_symbol = resolve_result_symbol(jogo)
+        if not result_symbol:
+            continue
+        if result_symbol in option_symbols(best_global[i], jogo["_top_symbols"]):
+            hits += 1
+    return hits
+
+
+def summarize_hits(hits_per_concurso: List[int], weight: float, scope: str) -> Dict[str, float]:
+    hit_distribution = Counter(hits_per_concurso)
+    n = len(hits_per_concurso)
+    return {
+        "scope": scope,
+        "weight": weight,
+        "avg_hits": mean(hits_per_concurso),
+        "avg_coverage": mean(h / 14 for h in hits_per_concurso),
+        "pct_11": hit_distribution.get(11, 0) / n,
+        "pct_12": hit_distribution.get(12, 0) / n,
+        "pct_13": hit_distribution.get(13, 0) / n,
+        "pct_14": hit_distribution.get(14, 0) / n,
+        "n_concursos": n,
+    }
+
+
 def backtest_penalty_weights(
     rows: List[Dict[str, str]],
     targets: Dict[str, Dict[str, float]],
@@ -48,7 +113,6 @@ def backtest_penalty_weights(
     for row in rows:
         by_concurso[row["Concurso"]].append(enrich_probabilities(row))
 
-    configs = feasible_type_configs()
     results = []
     concursos_ids = sorted(by_concurso.keys(), key=int)
     if max_concursos > 0:
@@ -56,65 +120,83 @@ def backtest_penalty_weights(
 
     for penalty_weight in penalty_weights:
         hits_per_concurso = []
-
         for concurso_id in concursos_ids:
             jogos_ordenados = sorted(by_concurso[concurso_id], key=lambda x: int(x["Jogo"]))
+            hits = evaluate_concurso(
+                jogos_ordenados,
+                targets,
+                penalty_weight,
+                iterations=iterations,
+                seed=seed + int(concurso_id),
+            )
+            if hits >= 0:
+                hits_per_concurso.append(hits)
 
-            best_global = None
-            best_obj = None
-
-            for config in configs:
-                if sum(config.values()) != len(jogos_ordenados):
-                    continue
-
-                _, assignment = best_assignment_for_config(jogos_ordenados, config)
-                if not assignment:
-                    continue
-
-                improved, debug = local_search(
-                    jogos_ordenados,
-                    assignment,
-                    targets,
-                    penalty_weight=penalty_weight,
-                    iterations=iterations,
-                    seed=seed + int(concurso_id),
-                )
-
-                if best_obj is None or debug["objective"] > best_obj:
-                    best_obj = debug["objective"]
-                    best_global = improved
-
-            if best_global is None:
-                continue
-
-            hits = 0
-            for i, jogo in enumerate(jogos_ordenados):
-                result_symbol = resolve_result_symbol(jogo)
-                if not result_symbol:
-                    continue
-                if result_symbol in option_symbols(best_global[i], jogo["_top_symbols"]):
-                    hits += 1
-            hits_per_concurso.append(hits)
-
-        if not hits_per_concurso:
-            continue
-
-        hit_distribution = Counter(hits_per_concurso)
-        n = len(hits_per_concurso)
-        results.append(
-            {
-                "weight": penalty_weight,
-                "avg_hits": mean(hits_per_concurso),
-                "avg_coverage": mean(h / 14 for h in hits_per_concurso),
-                "pct_11": hit_distribution.get(11, 0) / n,
-                "pct_12": hit_distribution.get(12, 0) / n,
-                "pct_13": hit_distribution.get(13, 0) / n,
-                "pct_14": hit_distribution.get(14, 0) / n,
-                "n_concursos": n,
-            }
-        )
+        if hits_per_concurso:
+            results.append(summarize_hits(hits_per_concurso, penalty_weight, f"last_{max_concursos}"))
 
     return sorted(results, key=lambda x: x["avg_hits"], reverse=True)
+
+
+def walk_forward_backtest(
+    rows: List[Dict[str, str]],
+    targets: Dict[str, Dict[str, float]],
+    penalty_weights: List[float],
+    iterations: int,
+    seed: int,
+    train_window: int,
+    max_steps: int,
+) -> List[Dict[str, float]]:
+    by_concurso: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        by_concurso[row["Concurso"]].append(enrich_probabilities(row))
+
+    concursos_ids = sorted(by_concurso.keys(), key=int)
+    if len(concursos_ids) <= train_window:
+        return []
+
+    eval_ids = concursos_ids[train_window:]
+    if max_steps > 0:
+        eval_ids = eval_ids[-max_steps:]
+
+    results = []
+    for penalty_weight in penalty_weights:
+        hits_per_concurso = []
+        for concurso_id in eval_ids:
+            jogos_ordenados = sorted(by_concurso[concurso_id], key=lambda x: int(x["Jogo"]))
+            hits = evaluate_concurso(
+                jogos_ordenados,
+                targets,
+                penalty_weight,
+                iterations=iterations,
+                seed=seed + int(concurso_id),
+            )
+            if hits >= 0:
+                hits_per_concurso.append(hits)
+        if hits_per_concurso:
+            results.append(summarize_hits(hits_per_concurso, penalty_weight, "walk_forward"))
+
+    return sorted(results, key=lambda x: x["avg_hits"], reverse=True)
+
+
+def select_best_weight(results: List[Dict[str, float]], default_weight: float) -> float:
+    if not results:
+        return default_weight
+
+    per_weight: Dict[float, List[float]] = defaultdict(list)
+    for entry in results:
+        per_weight[entry["weight"]].append(entry["avg_hits"])
+
+    aggregate = [
+        {
+            "weight": weight,
+            "avg_hits": mean(scores),
+            "n_evaluations": len(scores),
+        }
+        for weight, scores in per_weight.items()
+    ]
+    aggregate.sort(key=lambda x: x["avg_hits"], reverse=True)
+    return aggregate[0]["weight"]
 
 
 def train_model(history_path: str, model_path: str, preprocessed_path: str) -> dict:
@@ -139,18 +221,36 @@ def train_model(history_path: str, model_path: str, preprocessed_path: str) -> d
     }
 
     candidate_weights = [0.00, 0.10, 0.20, 0.35, 0.50, 0.75, 1.00]
-    weight_backtest = backtest_penalty_weights(
+    backtest_by_window = {
+        f"last_{window}": backtest_penalty_weights(
+            rows,
+            prep_summary["target_metrics"],
+            penalty_weights=candidate_weights,
+            iterations=20,
+            seed=42,
+            max_concursos=window,
+        )
+        for window in BACKTEST_WINDOWS
+    }
+    walk_forward = walk_forward_backtest(
         rows,
         prep_summary["target_metrics"],
         penalty_weights=candidate_weights,
         iterations=20,
         seed=42,
-        max_concursos=20,
+        train_window=WALK_FORWARD_TRAIN_WINDOW,
+        max_steps=WALK_FORWARD_STEPS,
     )
-    best_weight = weight_backtest[0]["weight"] if weight_backtest else 0.35
+
+    all_backtests = []
+    for window_results in backtest_by_window.values():
+        all_backtests.extend(window_results)
+    all_backtests.extend(walk_forward)
+
+    best_weight = select_best_weight(all_backtests, default_weight=0.35)
 
     model = {
-        "version": "1.1",
+        "version": "1.2",
         "hard_constraints": {
             "top1": 8,
             "top2": 5,
@@ -171,7 +271,14 @@ def train_model(history_path: str, model_path: str, preprocessed_path: str) -> d
             "soft_penalty_weight": best_weight,
             "local_search_iterations": 8000,
             "random_seed": 42,
-            "weight_backtest": weight_backtest,
+            "backtest_windows": BACKTEST_WINDOWS,
+            "walk_forward": {
+                "train_window": WALK_FORWARD_TRAIN_WINDOW,
+                "steps": WALK_FORWARD_STEPS,
+            },
+            "weight_backtest_by_window": backtest_by_window,
+            "weight_backtest_walk_forward": walk_forward,
+            "weight_backtest_aggregate": all_backtests,
         },
     }
 
@@ -180,7 +287,8 @@ def train_model(history_path: str, model_path: str, preprocessed_path: str) -> d
 
     logging.info("Modelo salvo em %s", model_path)
     logging.info("Distribuição histórica por rank: %s", rank_distribution)
-    logging.info("Backtest dos pesos da penalização: %s", weight_backtest)
+    logging.info("Backtest por janela: %s", backtest_by_window)
+    logging.info("Backtest walk-forward: %s", walk_forward)
     logging.info("Peso selecionado para busca local: %.2f", best_weight)
     return model
 

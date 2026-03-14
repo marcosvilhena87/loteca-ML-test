@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "hard_constraints": {
     "top1": 8,
     "top2": 5,
@@ -12,17 +12,17 @@
     "top1": {
       "avg_run_length": 2.143436754176611,
       "avg_run_count": 3.613365155131265,
-      "avg_run_position": 6.544749403341289
+      "avg_run_position": 7.116467780429594
     },
     "top2": {
       "avg_run_length": 1.3519490851233094,
       "avg_run_count": 2.7661097852028638,
-      "avg_run_position": 6.64005568814638
+      "avg_run_position": 6.82557677008751
     },
     "top3": {
       "avg_run_length": 1.267024661893397,
       "avg_run_count": 2.39618138424821,
-      "avg_run_position": 5.813882259347653
+      "avg_run_position": 5.9593277645186955
     }
   },
   "historical_stats": {
@@ -37,8 +37,80 @@
     "n_concursos": 419
   },
   "search": {
-    "soft_penalty_weight": 0.35,
+    "soft_penalty_weight": 0.0,
     "local_search_iterations": 8000,
-    "random_seed": 42
+    "random_seed": 42,
+    "weight_backtest": [
+      {
+        "weight": 0.0,
+        "avg_hits": 7.25,
+        "avg_coverage": 0.5178571428571429,
+        "pct_11": 0.0,
+        "pct_12": 0.05,
+        "pct_13": 0.0,
+        "pct_14": 0.0,
+        "n_concursos": 20
+      },
+      {
+        "weight": 0.1,
+        "avg_hits": 7.25,
+        "avg_coverage": 0.5178571428571428,
+        "pct_11": 0.05,
+        "pct_12": 0.0,
+        "pct_13": 0.0,
+        "pct_14": 0.0,
+        "n_concursos": 20
+      },
+      {
+        "weight": 1.0,
+        "avg_hits": 6.9,
+        "avg_coverage": 0.4928571428571428,
+        "pct_11": 0.05,
+        "pct_12": 0.0,
+        "pct_13": 0.0,
+        "pct_14": 0.0,
+        "n_concursos": 20
+      },
+      {
+        "weight": 0.75,
+        "avg_hits": 6.75,
+        "avg_coverage": 0.48214285714285715,
+        "pct_11": 0.05,
+        "pct_12": 0.0,
+        "pct_13": 0.0,
+        "pct_14": 0.0,
+        "n_concursos": 20
+      },
+      {
+        "weight": 0.2,
+        "avg_hits": 6.65,
+        "avg_coverage": 0.475,
+        "pct_11": 0.05,
+        "pct_12": 0.0,
+        "pct_13": 0.0,
+        "pct_14": 0.0,
+        "n_concursos": 20
+      },
+      {
+        "weight": 0.35,
+        "avg_hits": 6.55,
+        "avg_coverage": 0.46785714285714286,
+        "pct_11": 0.05,
+        "pct_12": 0.0,
+        "pct_13": 0.0,
+        "pct_14": 0.0,
+        "n_concursos": 20
+      },
+      {
+        "weight": 0.5,
+        "avg_hits": 6.55,
+        "avg_coverage": 0.46785714285714286,
+        "pct_11": 0.05,
+        "pct_12": 0.0,
+        "pct_13": 0.0,
+        "pct_14": 0.0,
+        "n_concursos": 20
+      }
+    ]
   }
 }

@@ -3,7 +3,7 @@ import logging
 import math
 import random
 from functools import lru_cache
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from scripts.common import (
     TOP_SLOT_NAMES,
@@ -121,26 +121,70 @@ def compute_soft_metrics(rows: List[MatchRow], picks: List[int]) -> Dict[str, Di
     return result
 
 
+def resolve_soft_metric_weights(model: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+    default_metric_weights = {"avg_length": 1.0, "avg_count": 1.0, "avg_position": 1.0}
+    configured = model.get("soft_metric_weights")
+    if isinstance(configured, dict):
+        resolved: Dict[str, Dict[str, float]] = {}
+        for slot in TOP_SLOT_NAMES:
+            slot_config = configured.get(slot, {})
+            if isinstance(slot_config, dict):
+                resolved[slot] = {metric: float(slot_config.get(metric, default_metric_weights[metric])) for metric in default_metric_weights}
+            else:
+                resolved[slot] = default_metric_weights.copy()
+        return resolved
+
+    legacy_slot_weights = model.get("soft_slot_weights", {})
+    resolved = {}
+    for slot in TOP_SLOT_NAMES:
+        slot_weight = float(legacy_slot_weights.get(slot, 1.0))
+        resolved[slot] = {metric: slot_weight for metric in default_metric_weights}
+    return resolved
+
+
 def soft_penalty(
     soft_metrics: Dict[str, Dict[str, float]],
     targets: Dict[str, Dict[str, float]],
-    slot_weights: Dict[str, float],
+    metric_weights: Dict[str, Dict[str, float]],
 ) -> float:
     penalty = 0.0
     for slot in TOP_SLOT_NAMES:
-        slot_weight = float(slot_weights.get(slot, 1.0))
+        slot_metric_weights = metric_weights.get(slot, {})
         current = soft_metrics.get(slot, {})
         target = targets.get(slot, {})
         for metric in ["avg_length", "avg_count", "avg_position"]:
+            metric_weight = float(slot_metric_weights.get(metric, 1.0))
             tv = float(target.get(metric, 0.0))
             cv = float(current.get(metric, 0.0))
             std = float(target.get(f"{metric}_std", 0.0))
             if std > 1e-9:
-                penalty += slot_weight * (abs(cv - tv) / std)
+                penalty += metric_weight * (abs(cv - tv) / std)
             else:
                 scale = max(1.0, abs(tv))
-                penalty += slot_weight * (abs(cv - tv) / scale)
+                penalty += metric_weight * (abs(cv - tv) / scale)
     return penalty
+
+
+def soft_penalty_breakdown(
+    soft_metrics: Dict[str, Dict[str, float]],
+    targets: Dict[str, Dict[str, float]],
+    metric_weights: Dict[str, Dict[str, float]],
+) -> Dict[str, Dict[str, float]]:
+    breakdown: Dict[str, Dict[str, float]] = {}
+    for slot in TOP_SLOT_NAMES:
+        breakdown[slot] = {}
+        slot_metric_weights = metric_weights.get(slot, {})
+        current = soft_metrics.get(slot, {})
+        target = targets.get(slot, {})
+        for metric in ["avg_length", "avg_count", "avg_position"]:
+            metric_weight = float(slot_metric_weights.get(metric, 1.0))
+            tv = float(target.get(metric, 0.0))
+            cv = float(current.get(metric, 0.0))
+            std = float(target.get(f"{metric}_std", 0.0))
+            normalized_diff = (abs(cv - tv) / std) if std > 1e-9 else (abs(cv - tv) / max(1.0, abs(tv)))
+            breakdown[slot][metric] = metric_weight * normalized_diff
+        breakdown[slot]["total"] = sum(breakdown[slot][metric] for metric in ["avg_length", "avg_count", "avg_position"])
+    return breakdown
 
 
 def hard_counts_from_picks(picks: List[int]) -> Tuple[int, int, int, int, int]:
@@ -160,7 +204,7 @@ def improve_with_soft_constraints(
     picks: List[int],
     targets: Dict[str, Dict[str, float]],
     hard: Dict[str, int],
-    slot_weights: Dict[str, float],
+    metric_weights: Dict[str, Dict[str, float]],
 ) -> List[int]:
     def base_score(local_picks: List[int]) -> float:
         return sum(option_probability(row, OPTIONS[pick][1]) for row, pick in zip(rows, local_picks))
@@ -170,7 +214,7 @@ def improve_with_soft_constraints(
         return c1 == hard["top1"] and c2 == hard["top2"] and c3 == hard["top3"] and secos == hard["secos"] and triplos == hard["triplos"]
 
     def objective(local_picks: List[int], soft_weight: float) -> float:
-        return base_score(local_picks) - soft_weight * soft_penalty(compute_soft_metrics(rows, local_picks), targets, slot_weights)
+        return base_score(local_picks) - soft_weight * soft_penalty(compute_soft_metrics(rows, local_picks), targets, metric_weights)
 
     def local_search(seed_picks: List[int], soft_weight: float) -> List[int]:
         current = seed_picks[:]
@@ -310,17 +354,12 @@ def predict(next_path: str, model_path: str, out_path: str) -> None:
 
     hard_raw = model.get("hard_constraints", {})
     hard = {"top1": int(hard_raw.get("top1", 9)), "top2": int(hard_raw.get("top2", 5)), "top3": int(hard_raw.get("top3", 4)), "secos": int(hard_raw.get("secos", 12)), "triplos": int(hard_raw.get("triplos", 2))}
-    soft_weights_raw = model.get("soft_slot_weights", {})
-    soft_slot_weights = {
-        "top1": float(soft_weights_raw.get("top1", 1.0)),
-        "top2": float(soft_weights_raw.get("top2", 1.0)),
-        "top3": float(soft_weights_raw.get("top3", 1.15)),
-    }
+    soft_metric_weights = resolve_soft_metric_weights(model)
 
     logging.info("Restrições hard em uso: %s", hard)
-    logging.info("Pesos soft por slot em uso: %s", soft_slot_weights)
+    logging.info("Pesos soft por slot/métrica em uso: %s", soft_metric_weights)
     picks = build_prediction(rows, hard)
-    picks = improve_with_soft_constraints(rows, picks, model.get("targets", {}), hard, soft_slot_weights)
+    picks = improve_with_soft_constraints(rows, picks, model.get("targets", {}), hard, soft_metric_weights)
 
     out_rows = []
     sum_top = [0, 0, 0]
@@ -352,6 +391,10 @@ def predict(next_path: str, model_path: str, out_path: str) -> None:
     logging.info("Secos=%s Triplos=%s", secos, triplos)
     logging.info("Métricas soft obtidas: %s", soft_metrics)
     logging.info("Métricas soft alvo: %s", model.get("targets", {}))
+    penalty_breakdown = soft_penalty_breakdown(soft_metrics, model.get("targets", {}), soft_metric_weights)
+    slot_totals = {slot: values["total"] for slot, values in penalty_breakdown.items()}
+    logging.info("Penalidade soft por slot/métrica: %s", penalty_breakdown)
+    logging.info("Penalidade total por slot: %s", slot_totals)
 
     write_csv_semicolon(
         out_path,

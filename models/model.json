@@ -41,9 +41,21 @@
     "secos": 12,
     "triplos": 2
   },
-  "soft_slot_weights": {
-    "top1": 1.0,
-    "top2": 1.0,
-    "top3": 1.15
+  "soft_metric_weights": {
+    "top1": {
+      "avg_length": 1.0,
+      "avg_count": 1.0,
+      "avg_position": 1.0
+    },
+    "top2": {
+      "avg_length": 1.0,
+      "avg_count": 1.0,
+      "avg_position": 1.0
+    },
+    "top3": {
+      "avg_length": 1.0,
+      "avg_count": 1.35,
+      "avg_position": 1.15
+    }
   }
 }

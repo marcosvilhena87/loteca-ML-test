@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "history_rows": 5894,
+    "unique_concursos": 421
+  },
+  "hit_rate": {
+    "top1": 0.5184933831014591,
+    "top2": 0.2775704105870377,
+    "top3": 0.20393620631150322
+  },
+  "targets": {
+    "top1": {
+      "avg_length": 2.1448931116389547,
+      "avg_count": 3.65083135391924,
+      "avg_position": 6.61381631037213
+    },
+    "top2": {
+      "avg_length": 1.414885193982581,
+      "avg_count": 2.821852731591449,
+      "avg_position": 6.701543942992874
+    },
+    "top3": {
+      "avg_length": 1.2326999208234362,
+      "avg_count": 2.2612826603325415,
+      "avg_position": 5.994813935075218
+    }
+  },
+  "hard_constraints": {
+    "top1": 9,
+    "top2": 5,
+    "top3": 4,
+    "secos": 12,
+    "triplos": 2
+  }
+}

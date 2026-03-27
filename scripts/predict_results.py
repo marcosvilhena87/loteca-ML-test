@@ -206,6 +206,8 @@ def improve_with_soft_constraints(
     hard: Dict[str, int],
     metric_weights: Dict[str, Dict[str, float]],
 ) -> List[int]:
+    eps = 1e-9
+
     def base_score(local_picks: List[int]) -> float:
         return sum(option_probability(row, OPTIONS[pick][1]) for row, pick in zip(rows, local_picks))
 
@@ -222,41 +224,72 @@ def improve_with_soft_constraints(
         current = float(top3_stats.get("avg_count", 0.0))
         return abs(current - target)
 
+    def lexicographic_score(local_picks: List[int], soft_weight: float) -> Tuple[float, float]:
+        # Prioridade 1: minimizar gap de top3.avg_count. Prioridade 2: maximizar objetivo.
+        return top3_avg_count_gap(local_picks), objective(local_picks, soft_weight)
+
+    def is_better_score(candidate_score: Tuple[float, float], best_score: Tuple[float, float]) -> bool:
+        cand_gap, cand_obj = candidate_score
+        best_gap, best_obj = best_score
+        return cand_gap < best_gap - eps or (abs(cand_gap - best_gap) <= eps and cand_obj > best_obj + eps)
+
     def local_search(seed_picks: List[int], soft_weight: float) -> List[int]:
         current = seed_picks[:]
-        best_obj = objective(current, soft_weight)
+        best_score = lexicographic_score(current, soft_weight)
         improved = True
         iters = 0
         while improved and iters < 10:
             improved = False
             iters += 1
-            if _targeted_top3_run_repair(rows, current, targets, feasible, lambda p: objective(p, soft_weight)):
-                best_obj = objective(current, soft_weight)
+            if _targeted_top3_run_repair(rows, current, targets, feasible, lambda p: lexicographic_score(p, soft_weight)):
+                best_score = lexicographic_score(current, soft_weight)
                 improved = True
-                logging.debug("Melhoria cirúrgica para runs top3 encontrada: w=%.2f obj=%.6f", soft_weight, best_obj)
+                logging.debug(
+                    "Melhoria cirúrgica para runs top3 encontrada: w=%.2f gap=%.6f obj=%.6f",
+                    soft_weight,
+                    best_score[0],
+                    best_score[1],
+                )
                 continue
             for k in (2, 3):
-                if _try_k_swap_neighborhood(current, k, feasible, lambda p: objective(p, soft_weight), best_obj):
-                    best_obj = objective(current, soft_weight)
+                if _try_k_swap_neighborhood(current, k, feasible, lambda p: lexicographic_score(p, soft_weight), best_score):
+                    best_score = lexicographic_score(current, soft_weight)
                     improved = True
-                    logging.debug("Melhoria local (k=%s) encontrada: w=%.2f obj=%.6f", k, soft_weight, best_obj)
+                    logging.debug(
+                        "Melhoria local (k=%s) encontrada: w=%.2f gap=%.6f obj=%.6f",
+                        k,
+                        soft_weight,
+                        best_score[0],
+                        best_score[1],
+                    )
                     break
             if improved:
                 continue
-            if _try_k_swap_neighborhood(current, 4, feasible, lambda p: objective(p, soft_weight), best_obj):
-                best_obj = objective(current, soft_weight)
+            if _try_k_swap_neighborhood(current, 4, feasible, lambda p: lexicographic_score(p, soft_weight), best_score):
+                best_score = lexicographic_score(current, soft_weight)
                 improved = True
-                logging.debug("Melhoria local (k=4) encontrada: w=%.2f obj=%.6f", soft_weight, best_obj)
+                logging.debug("Melhoria local (k=4) encontrada: w=%.2f gap=%.6f obj=%.6f", soft_weight, best_score[0], best_score[1])
                 continue
             if improved:
                 continue
-            annealed = _simulated_annealing(current, feasible, lambda p: objective(p, soft_weight), max_steps=350, max_move_k=5)
-            annealed_obj = objective(annealed, soft_weight)
-            if annealed_obj > best_obj + 1e-9:
+            annealed = _simulated_annealing(
+                current,
+                feasible,
+                lambda p: lexicographic_score(p, soft_weight),
+                max_steps=350,
+                max_move_k=5,
+            )
+            annealed_score = lexicographic_score(annealed, soft_weight)
+            if is_better_score(annealed_score, best_score):
                 current = annealed
-                best_obj = annealed_obj
+                best_score = annealed_score
                 improved = True
-                logging.debug("Melhoria por annealing encontrada: w=%.2f obj=%.6f", soft_weight, best_obj)
+                logging.debug(
+                    "Melhoria por annealing encontrada: w=%.2f gap=%.6f obj=%.6f",
+                    soft_weight,
+                    best_score[0],
+                    best_score[1],
+                )
         return current
 
     if not feasible(picks):
@@ -265,7 +298,7 @@ def improve_with_soft_constraints(
     staged_weights = [0.08, 0.15, 0.25, 0.40]
     current = picks[:]
     for weight in staged_weights:
-        before = objective(current, weight)
+        before_score = lexicographic_score(current, weight)
         seed_candidates = [current[:]]
         for _ in range(4):
             perturbed = _sample_feasible_perturbation(current, feasible, max_k=5, attempts=220)
@@ -273,24 +306,21 @@ def improve_with_soft_constraints(
                 seed_candidates.append(perturbed)
 
         best_candidate = current[:]
-        best_candidate_obj = before
-        best_top3_gap = top3_avg_count_gap(best_candidate)
+        best_candidate_score = before_score
         for seed in seed_candidates:
             refined = local_search(seed, weight)
-            refined_obj = objective(refined, weight)
-            refined_top3_gap = top3_avg_count_gap(refined)
-            if refined_obj > best_candidate_obj + 1e-9 or (abs(refined_obj - best_candidate_obj) <= 1e-9 and refined_top3_gap < best_top3_gap):
+            refined_score = lexicographic_score(refined, weight)
+            if is_better_score(refined_score, best_candidate_score):
                 best_candidate = refined
-                best_candidate_obj = refined_obj
-                best_top3_gap = refined_top3_gap
+                best_candidate_score = refined_score
 
         current = best_candidate
-        after = best_candidate_obj
+        best_top3_gap, after = best_candidate_score
         logging.info(
             "Busca soft (peso=%.2f, starts=%s): obj antes=%.6f | obj depois=%.6f | gap_top3.avg_count=%.6f",
             weight,
             len(seed_candidates),
-            before,
+            before_score[1],
             after,
             best_top3_gap,
         )
@@ -301,9 +331,10 @@ def _try_k_swap_neighborhood(
     picks: List[int],
     k: int,
     feasible_fn,
-    objective_fn,
-    current_obj: float,
+    score_fn,
+    current_score: Tuple[float, float],
 ) -> bool:
+    eps = 1e-9
     n = len(picks)
     if k > n:
         return False
@@ -322,8 +353,11 @@ def _try_k_swap_neighborhood(
         if pos == len(indices):
             if not feasible_fn(candidate):
                 return False
-            cand_obj = objective_fn(candidate)
-            if cand_obj > current_obj + 1e-9:
+            cand_score = score_fn(candidate)
+            cand_gap, cand_obj = cand_score
+            current_gap, current_obj = current_score
+            is_better = cand_gap < current_gap - eps or (abs(cand_gap - current_gap) <= eps and cand_obj > current_obj + eps)
+            if is_better:
                 picks[:] = candidate
                 return True
             return False
@@ -348,14 +382,15 @@ def _try_k_swap_neighborhood(
 def _simulated_annealing(
     picks: List[int],
     feasible_fn,
-    objective_fn,
+    score_fn,
     max_steps: int = 200,
     max_move_k: int = 3,
 ) -> List[int]:
+    eps = 1e-9
     current = picks[:]
-    current_obj = objective_fn(current)
+    current_gap, current_obj = score_fn(current)
     best = current[:]
-    best_obj = current_obj
+    best_gap, best_obj = current_gap, current_obj
     temperature = 0.5
 
     for step in range(max_steps):
@@ -377,13 +412,18 @@ def _simulated_annealing(
         if not changed or not feasible_fn(candidate):
             continue
 
-        cand_obj = objective_fn(candidate)
+        cand_gap, cand_obj = score_fn(candidate)
         delta = cand_obj - current_obj
-        if delta > 0 or random.random() < math.exp(delta / max(1e-6, temperature)):
+        if (
+            cand_gap < current_gap - eps
+            or (abs(cand_gap - current_gap) <= eps and (delta > 0 or random.random() < math.exp(delta / max(1e-6, temperature))))
+        ):
             current = candidate
+            current_gap = cand_gap
             current_obj = cand_obj
-            if cand_obj > best_obj:
+            if cand_gap < best_gap - eps or (abs(cand_gap - best_gap) <= eps and cand_obj > best_obj + eps):
                 best = candidate
+                best_gap = cand_gap
                 best_obj = cand_obj
         temperature *= 0.985
         if temperature < 0.01 and step > max_steps * 0.6:
@@ -421,7 +461,7 @@ def _targeted_top3_run_repair(
     picks: List[int],
     targets: Dict[str, Dict[str, float]],
     feasible_fn,
-    objective_fn,
+    score_fn,
 ) -> bool:
     target_avg_count = float(targets.get("top3", {}).get("avg_count", 0.0))
     if target_avg_count <= 0:
@@ -437,10 +477,10 @@ def _targeted_top3_run_repair(
     if current_avg_count <= target_avg_count + 1e-9:
         return False
 
-    current_obj = objective_fn(picks)
+    current_gap_obj = score_fn(picks)
     current_gap = abs(current_avg_count - target_avg_count)
     best_candidate: Optional[List[int]] = None
-    best_obj = current_obj
+    best_score = current_gap_obj
     best_gap = current_gap
 
     for pos in range(len(sorted_idx) - 1):
@@ -464,13 +504,14 @@ def _targeted_top3_run_repair(
                 candidate_gap = abs(candidate_avg_count - target_avg_count)
                 if candidate_gap > current_gap + 1e-9:
                     continue
-                cand_obj = objective_fn(candidate)
-                if candidate_gap < best_gap - 1e-9 or (abs(candidate_gap - best_gap) <= 1e-9 and cand_obj > best_obj + 1e-9):
+                cand_score = score_fn(candidate)
+                cand_obj = cand_score[1]
+                if candidate_gap < best_gap - 1e-9 or (abs(candidate_gap - best_gap) <= 1e-9 and cand_obj > best_score[1] + 1e-9):
                     best_candidate = candidate
-                    best_obj = cand_obj
+                    best_score = cand_score
                     best_gap = candidate_gap
 
-    if best_candidate is not None and (best_gap < current_gap - 1e-9 or best_obj > current_obj + 1e-9):
+    if best_candidate is not None and (best_gap < current_gap - 1e-9 or best_score[1] > current_gap_obj[1] + 1e-9):
         picks[:] = best_candidate
         return True
     return False

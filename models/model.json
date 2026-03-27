@@ -40,5 +40,10 @@
     "top3": 4,
     "secos": 12,
     "triplos": 2
+  },
+  "soft_slot_weights": {
+    "top1": 1.0,
+    "top2": 1.0,
+    "top3": 1.15
   }
 }

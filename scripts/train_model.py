@@ -29,6 +29,11 @@ def train(history_path: str, model_path: str) -> Dict[str, object]:
             "secos": 12,
             "triplos": 2,
         },
+        "soft_slot_weights": {
+            "top1": 1.0,
+            "top2": 1.0,
+            "top3": 1.15,
+        },
     }
     dump_json(model_path, model)
     logging.info("Modelo treinado e salvo em %s", model_path)

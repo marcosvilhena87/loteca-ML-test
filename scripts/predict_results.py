@@ -216,6 +216,12 @@ def improve_with_soft_constraints(
     def objective(local_picks: List[int], soft_weight: float) -> float:
         return base_score(local_picks) - soft_weight * soft_penalty(compute_soft_metrics(rows, local_picks), targets, metric_weights)
 
+    def top3_avg_count_gap(local_picks: List[int]) -> float:
+        top3_stats = compute_soft_metrics(rows, local_picks).get("top3", {})
+        target = float(targets.get("top3", {}).get("avg_count", top3_stats.get("avg_count", 0.0)))
+        current = float(top3_stats.get("avg_count", 0.0))
+        return abs(current - target)
+
     def local_search(seed_picks: List[int], soft_weight: float) -> List[int]:
         current = seed_picks[:]
         best_obj = objective(current, soft_weight)
@@ -224,6 +230,11 @@ def improve_with_soft_constraints(
         while improved and iters < 10:
             improved = False
             iters += 1
+            if _targeted_top3_run_repair(rows, current, targets, feasible, lambda p: objective(p, soft_weight)):
+                best_obj = objective(current, soft_weight)
+                improved = True
+                logging.debug("Melhoria cirúrgica para runs top3 encontrada: w=%.2f obj=%.6f", soft_weight, best_obj)
+                continue
             for k in (2, 3):
                 if _try_k_swap_neighborhood(current, k, feasible, lambda p: objective(p, soft_weight), best_obj):
                     best_obj = objective(current, soft_weight)
@@ -232,7 +243,14 @@ def improve_with_soft_constraints(
                     break
             if improved:
                 continue
-            annealed = _simulated_annealing(current, feasible, lambda p: objective(p, soft_weight), max_steps=250)
+            if _try_k_swap_neighborhood(current, 4, feasible, lambda p: objective(p, soft_weight), best_obj):
+                best_obj = objective(current, soft_weight)
+                improved = True
+                logging.debug("Melhoria local (k=4) encontrada: w=%.2f obj=%.6f", soft_weight, best_obj)
+                continue
+            if improved:
+                continue
+            annealed = _simulated_annealing(current, feasible, lambda p: objective(p, soft_weight), max_steps=350, max_move_k=5)
             annealed_obj = objective(annealed, soft_weight)
             if annealed_obj > best_obj + 1e-9:
                 current = annealed
@@ -248,9 +266,34 @@ def improve_with_soft_constraints(
     current = picks[:]
     for weight in staged_weights:
         before = objective(current, weight)
-        current = local_search(current, weight)
-        after = objective(current, weight)
-        logging.info("Busca soft (peso=%.2f): obj antes=%.6f | obj depois=%.6f", weight, before, after)
+        seed_candidates = [current[:]]
+        for _ in range(4):
+            perturbed = _sample_feasible_perturbation(current, feasible, max_k=5, attempts=220)
+            if perturbed is not None:
+                seed_candidates.append(perturbed)
+
+        best_candidate = current[:]
+        best_candidate_obj = before
+        best_top3_gap = top3_avg_count_gap(best_candidate)
+        for seed in seed_candidates:
+            refined = local_search(seed, weight)
+            refined_obj = objective(refined, weight)
+            refined_top3_gap = top3_avg_count_gap(refined)
+            if refined_obj > best_candidate_obj + 1e-9 or (abs(refined_obj - best_candidate_obj) <= 1e-9 and refined_top3_gap < best_top3_gap):
+                best_candidate = refined
+                best_candidate_obj = refined_obj
+                best_top3_gap = refined_top3_gap
+
+        current = best_candidate
+        after = best_candidate_obj
+        logging.info(
+            "Busca soft (peso=%.2f, starts=%s): obj antes=%.6f | obj depois=%.6f | gap_top3.avg_count=%.6f",
+            weight,
+            len(seed_candidates),
+            before,
+            after,
+            best_top3_gap,
+        )
     return current
 
 
@@ -302,7 +345,13 @@ def _try_k_swap_neighborhood(
     return backtrack(0, 0, [])
 
 
-def _simulated_annealing(picks: List[int], feasible_fn, objective_fn, max_steps: int = 200) -> List[int]:
+def _simulated_annealing(
+    picks: List[int],
+    feasible_fn,
+    objective_fn,
+    max_steps: int = 200,
+    max_move_k: int = 3,
+) -> List[int]:
     current = picks[:]
     current_obj = objective_fn(current)
     best = current[:]
@@ -310,7 +359,12 @@ def _simulated_annealing(picks: List[int], feasible_fn, objective_fn, max_steps:
     temperature = 0.5
 
     for step in range(max_steps):
-        k = 3 if random.random() < 0.35 else 2
+        k_choices = [2, 3]
+        if max_move_k >= 4:
+            k_choices.extend([4, 4])
+        if max_move_k >= 5:
+            k_choices.append(5)
+        k = random.choice(k_choices)
         idxs = random.sample(range(len(current)), k=min(k, len(current)))
         candidate = current[:]
         changed = False
@@ -335,6 +389,91 @@ def _simulated_annealing(picks: List[int], feasible_fn, objective_fn, max_steps:
         if temperature < 0.01 and step > max_steps * 0.6:
             break
     return best
+
+
+def _sample_feasible_perturbation(
+    picks: List[int],
+    feasible_fn,
+    max_k: int = 5,
+    attempts: int = 120,
+) -> Optional[List[int]]:
+    n = len(picks)
+    if n < 2:
+        return None
+    for _ in range(attempts):
+        candidate = picks[:]
+        k = random.randint(2, min(max_k, n))
+        idxs = random.sample(range(n), k)
+        changed = False
+        for idx in idxs:
+            choices = [option_idx for option_idx, _ in enumerate(OPTIONS) if option_idx != candidate[idx]]
+            if not choices:
+                continue
+            candidate[idx] = random.choice(choices)
+            changed = True
+        if changed and feasible_fn(candidate):
+            return candidate
+    return None
+
+
+def _targeted_top3_run_repair(
+    rows: List[MatchRow],
+    picks: List[int],
+    targets: Dict[str, Dict[str, float]],
+    feasible_fn,
+    objective_fn,
+) -> bool:
+    target_avg_count = float(targets.get("top3", {}).get("avg_count", 0.0))
+    if target_avg_count <= 0:
+        return False
+
+    sorted_idx = sorted(range(len(rows)), key=lambda i: rows[i].p_top3, reverse=True)
+
+    def sequence(local_picks: List[int]) -> List[int]:
+        return [1 if 2 in OPTIONS[local_picks[i]][1] else 0 for i in sorted_idx]
+
+    seq = sequence(picks)
+    current_avg_count = runs_metrics(seq).avg_count
+    if current_avg_count <= target_avg_count + 1e-9:
+        return False
+
+    current_obj = objective_fn(picks)
+    current_gap = abs(current_avg_count - target_avg_count)
+    best_candidate: Optional[List[int]] = None
+    best_obj = current_obj
+    best_gap = current_gap
+
+    for pos in range(len(sorted_idx) - 1):
+        if seq[pos] == seq[pos + 1]:
+            continue
+        i = sorted_idx[pos]
+        j = sorted_idx[pos + 1]
+        pi = picks[i]
+        pj = picks[j]
+        for oi, _ in enumerate(OPTIONS):
+            for oj, _ in enumerate(OPTIONS):
+                if oi == pi and oj == pj:
+                    continue
+                candidate = picks[:]
+                candidate[i] = oi
+                candidate[j] = oj
+                if not feasible_fn(candidate):
+                    continue
+                candidate_seq = sequence(candidate)
+                candidate_avg_count = runs_metrics(candidate_seq).avg_count
+                candidate_gap = abs(candidate_avg_count - target_avg_count)
+                if candidate_gap > current_gap + 1e-9:
+                    continue
+                cand_obj = objective_fn(candidate)
+                if candidate_gap < best_gap - 1e-9 or (abs(candidate_gap - best_gap) <= 1e-9 and cand_obj > best_obj + 1e-9):
+                    best_candidate = candidate
+                    best_obj = cand_obj
+                    best_gap = candidate_gap
+
+    if best_candidate is not None and (best_gap < current_gap - 1e-9 or best_obj > current_obj + 1e-9):
+        picks[:] = best_candidate
+        return True
+    return False
 
 
 def outcomes_from_slots(match: MatchRow, slots: Sequence[int]) -> str:

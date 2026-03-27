@@ -1,5 +1,7 @@
 import argparse
 import logging
+import math
+import random
 from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -127,8 +129,12 @@ def soft_penalty(soft_metrics: Dict[str, Dict[str, float]], targets: Dict[str, D
         for metric in ["avg_length", "avg_count", "avg_position"]:
             tv = float(target.get(metric, 0.0))
             cv = float(current.get(metric, 0.0))
-            scale = max(1.0, abs(tv))
-            penalty += abs(cv - tv) / scale
+            std = float(target.get(f"{metric}_std", 0.0))
+            if std > 1e-9:
+                penalty += abs(cv - tv) / std
+            else:
+                scale = max(1.0, abs(tv))
+                penalty += abs(cv - tv) / scale
     return penalty
 
 
@@ -148,45 +154,132 @@ def improve_with_soft_constraints(rows: List[MatchRow], picks: List[int], target
     def base_score(local_picks: List[int]) -> float:
         return sum(option_probability(row, OPTIONS[pick][1]) for row, pick in zip(rows, local_picks))
 
-    def objective(local_picks: List[int]) -> float:
-        # prioriza cobertura; usa soft como desempate leve
-        return base_score(local_picks) - 0.08 * soft_penalty(compute_soft_metrics(rows, local_picks), targets)
+    def feasible(local_picks: List[int]) -> bool:
+        c1, c2, c3, secos, triplos = hard_counts_from_picks(local_picks)
+        return c1 == hard["top1"] and c2 == hard["top2"] and c3 == hard["top3"] and secos == hard["secos"] and triplos == hard["triplos"]
 
-    current = picks[:]
-    best_obj = objective(current)
-    improved = True
-    iters = 0
-    while improved and iters < 8:
-        improved = False
-        iters += 1
-        for i in range(len(current)):
-            for oi, _ in enumerate(OPTIONS):
-                if oi == current[i]:
-                    continue
-                for j in range(i + 1, len(current)):
-                    for oj, _ in enumerate(OPTIONS):
-                        if oj == current[j]:
-                            continue
-                        candidate = current[:]
-                        candidate[i] = oi
-                        candidate[j] = oj
-                        c1, c2, c3, secos, triplos = hard_counts_from_picks(candidate)
-                        if c1 != hard["top1"] or c2 != hard["top2"] or c3 != hard["top3"] or secos != hard["secos"] or triplos != hard["triplos"]:
-                            continue
-                        cand_obj = objective(candidate)
-                        if cand_obj > best_obj + 1e-9:
-                            current = candidate
-                            best_obj = cand_obj
-                            improved = True
-                            logging.debug("Melhoria soft encontrada: obj=%.6f", cand_obj)
-                            break
-                    if improved:
-                        break
-                if improved:
+    def objective(local_picks: List[int], soft_weight: float) -> float:
+        return base_score(local_picks) - soft_weight * soft_penalty(compute_soft_metrics(rows, local_picks), targets)
+
+    def local_search(seed_picks: List[int], soft_weight: float) -> List[int]:
+        current = seed_picks[:]
+        best_obj = objective(current, soft_weight)
+        improved = True
+        iters = 0
+        while improved and iters < 10:
+            improved = False
+            iters += 1
+            for k in (2, 3):
+                if _try_k_swap_neighborhood(current, k, feasible, lambda p: objective(p, soft_weight), best_obj):
+                    best_obj = objective(current, soft_weight)
+                    improved = True
+                    logging.debug("Melhoria local (k=%s) encontrada: w=%.2f obj=%.6f", k, soft_weight, best_obj)
                     break
             if improved:
-                break
+                continue
+            annealed = _simulated_annealing(current, feasible, lambda p: objective(p, soft_weight), max_steps=250)
+            annealed_obj = objective(annealed, soft_weight)
+            if annealed_obj > best_obj + 1e-9:
+                current = annealed
+                best_obj = annealed_obj
+                improved = True
+                logging.debug("Melhoria por annealing encontrada: w=%.2f obj=%.6f", soft_weight, best_obj)
+        return current
+
+    if not feasible(picks):
+        raise RuntimeError("Solução inicial inviável para as restrições hard.")
+
+    staged_weights = [0.08, 0.15, 0.25, 0.40]
+    current = picks[:]
+    for weight in staged_weights:
+        before = objective(current, weight)
+        current = local_search(current, weight)
+        after = objective(current, weight)
+        logging.info("Busca soft (peso=%.2f): obj antes=%.6f | obj depois=%.6f", weight, before, after)
     return current
+
+
+def _try_k_swap_neighborhood(
+    picks: List[int],
+    k: int,
+    feasible_fn,
+    objective_fn,
+    current_obj: float,
+) -> bool:
+    n = len(picks)
+    if k > n:
+        return False
+
+    def backtrack(depth: int, start: int, idxs: List[int]) -> bool:
+        if depth == k:
+            return evaluate_indices(idxs)
+        for idx in range(start, n):
+            idxs.append(idx)
+            if backtrack(depth + 1, idx + 1, idxs):
+                return True
+            idxs.pop()
+        return False
+
+    def enumerate_options(indices: List[int], pos: int, candidate: List[int]) -> bool:
+        if pos == len(indices):
+            if not feasible_fn(candidate):
+                return False
+            cand_obj = objective_fn(candidate)
+            if cand_obj > current_obj + 1e-9:
+                picks[:] = candidate
+                return True
+            return False
+        idx = indices[pos]
+        current_pick = picks[idx]
+        for option_idx, _ in enumerate(OPTIONS):
+            if option_idx == current_pick:
+                continue
+            candidate[idx] = option_idx
+            if enumerate_options(indices, pos + 1, candidate):
+                return True
+        candidate[idx] = current_pick
+        return False
+
+    def evaluate_indices(indices: List[int]) -> bool:
+        candidate = picks[:]
+        return enumerate_options(indices, 0, candidate)
+
+    return backtrack(0, 0, [])
+
+
+def _simulated_annealing(picks: List[int], feasible_fn, objective_fn, max_steps: int = 200) -> List[int]:
+    current = picks[:]
+    current_obj = objective_fn(current)
+    best = current[:]
+    best_obj = current_obj
+    temperature = 0.5
+
+    for step in range(max_steps):
+        k = 3 if random.random() < 0.35 else 2
+        idxs = random.sample(range(len(current)), k=min(k, len(current)))
+        candidate = current[:]
+        changed = False
+        for idx in idxs:
+            options_pool = [oi for oi, _ in enumerate(OPTIONS) if oi != candidate[idx]]
+            if not options_pool:
+                continue
+            candidate[idx] = random.choice(options_pool)
+            changed = True
+        if not changed or not feasible_fn(candidate):
+            continue
+
+        cand_obj = objective_fn(candidate)
+        delta = cand_obj - current_obj
+        if delta > 0 or random.random() < math.exp(delta / max(1e-6, temperature)):
+            current = candidate
+            current_obj = cand_obj
+            if cand_obj > best_obj:
+                best = candidate
+                best_obj = cand_obj
+        temperature *= 0.985
+        if temperature < 0.01 and step > max_steps * 0.6:
+            break
+    return best
 
 
 def outcomes_from_slots(match: MatchRow, slots: Sequence[int]) -> str:

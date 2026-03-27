@@ -106,8 +106,11 @@ def runs_metrics(binary_sequence: Sequence[int]) -> RunStats:
         return RunStats(0.0, 0.0, 0.0)
 
     lengths = [length for _, length in runs]
-    positions = [pos for pos, _ in runs]
-    return RunStats(avg_length=mean(lengths), avg_count=float(len(runs)), avg_position=mean(positions))
+    # posição pelo centro da run, ponderada pelo comprimento da própria run
+    centers = [start + (length - 1) / 2.0 for start, length in runs]
+    total_length = sum(lengths)
+    weighted_center = sum(center * length for center, length in zip(centers, lengths)) / total_length if total_length else 0.0
+    return RunStats(avg_length=mean(lengths), avg_count=float(len(runs)), avg_position=weighted_center)
 
 
 def grouped_by_concurso(rows: Iterable[MatchRow]) -> Dict[str, List[MatchRow]]:

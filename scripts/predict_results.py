@@ -205,6 +205,7 @@ def improve_with_soft_constraints(
     targets: Dict[str, Dict[str, float]],
     hard: Dict[str, int],
     metric_weights: Dict[str, Dict[str, float]],
+    top3_avg_count_gap_tolerance: float = 0.30,
 ) -> List[int]:
     eps = 1e-9
 
@@ -224,13 +225,22 @@ def improve_with_soft_constraints(
         current = float(top3_stats.get("avg_count", 0.0))
         return abs(current - target)
 
-    def lexicographic_score(local_picks: List[int], soft_weight: float) -> Tuple[float, float]:
-        # Prioridade 1: minimizar gap de top3.avg_count. Prioridade 2: maximizar objetivo.
-        return top3_avg_count_gap(local_picks), objective(local_picks, soft_weight)
+    def lexicographic_score(local_picks: List[int], soft_weight: float) -> Tuple[int, float, float]:
+        # Prioridade com faixa de tolerância:
+        # 1) entrar na faixa de gap_top3.avg_count <= tolerância;
+        # 2) dentro da faixa, maximizar objetivo global;
+        # 3) fora da faixa, minimizar gap e depois maximizar objetivo.
+        gap = top3_avg_count_gap(local_picks)
+        in_tolerance_band = 1 if gap <= top3_avg_count_gap_tolerance + eps else 0
+        return in_tolerance_band, gap, objective(local_picks, soft_weight)
 
-    def is_better_score(candidate_score: Tuple[float, float], best_score: Tuple[float, float]) -> bool:
-        cand_gap, cand_obj = candidate_score
-        best_gap, best_obj = best_score
+    def is_better_score(candidate_score: Tuple[int, float, float], best_score: Tuple[int, float, float]) -> bool:
+        cand_in_band, cand_gap, cand_obj = candidate_score
+        best_in_band, best_gap, best_obj = best_score
+        if cand_in_band != best_in_band:
+            return cand_in_band > best_in_band
+        if cand_in_band == 1:
+            return cand_obj > best_obj + eps or (abs(cand_obj - best_obj) <= eps and cand_gap < best_gap - eps)
         return cand_gap < best_gap - eps or (abs(cand_gap - best_gap) <= eps and cand_obj > best_obj + eps)
 
     def local_search(seed_picks: List[int], soft_weight: float) -> List[int]:
@@ -245,10 +255,11 @@ def improve_with_soft_constraints(
                 best_score = lexicographic_score(current, soft_weight)
                 improved = True
                 logging.debug(
-                    "Melhoria cirúrgica para runs top3 encontrada: w=%.2f gap=%.6f obj=%.6f",
+                    "Melhoria cirúrgica para runs top3 encontrada: w=%.2f in_band=%s gap=%.6f obj=%.6f",
                     soft_weight,
                     best_score[0],
                     best_score[1],
+                    best_score[2],
                 )
                 continue
             for k in (2, 3):
@@ -256,11 +267,12 @@ def improve_with_soft_constraints(
                     best_score = lexicographic_score(current, soft_weight)
                     improved = True
                     logging.debug(
-                        "Melhoria local (k=%s) encontrada: w=%.2f gap=%.6f obj=%.6f",
+                        "Melhoria local (k=%s) encontrada: w=%.2f in_band=%s gap=%.6f obj=%.6f",
                         k,
                         soft_weight,
                         best_score[0],
                         best_score[1],
+                        best_score[2],
                     )
                     break
             if improved:
@@ -268,7 +280,13 @@ def improve_with_soft_constraints(
             if _try_k_swap_neighborhood(current, 4, feasible, lambda p: lexicographic_score(p, soft_weight), best_score):
                 best_score = lexicographic_score(current, soft_weight)
                 improved = True
-                logging.debug("Melhoria local (k=4) encontrada: w=%.2f gap=%.6f obj=%.6f", soft_weight, best_score[0], best_score[1])
+                logging.debug(
+                    "Melhoria local (k=4) encontrada: w=%.2f in_band=%s gap=%.6f obj=%.6f",
+                    soft_weight,
+                    best_score[0],
+                    best_score[1],
+                    best_score[2],
+                )
                 continue
             if improved:
                 continue
@@ -285,10 +303,11 @@ def improve_with_soft_constraints(
                 best_score = annealed_score
                 improved = True
                 logging.debug(
-                    "Melhoria por annealing encontrada: w=%.2f gap=%.6f obj=%.6f",
+                    "Melhoria por annealing encontrada: w=%.2f in_band=%s gap=%.6f obj=%.6f",
                     soft_weight,
                     best_score[0],
                     best_score[1],
+                    best_score[2],
                 )
         return current
 
@@ -315,14 +334,16 @@ def improve_with_soft_constraints(
                 best_candidate_score = refined_score
 
         current = best_candidate
-        best_top3_gap, after = best_candidate_score
+        best_in_band, best_top3_gap, after = best_candidate_score
         logging.info(
-            "Busca soft (peso=%.2f, starts=%s): obj antes=%.6f | obj depois=%.6f | gap_top3.avg_count=%.6f",
+            "Busca soft (peso=%.2f, starts=%s): obj antes=%.6f | obj depois=%.6f | in_band=%s | gap_top3.avg_count=%.6f (tol=%.6f)",
             weight,
             len(seed_candidates),
-            before_score[1],
+            before_score[2],
             after,
+            bool(best_in_band),
             best_top3_gap,
+            top3_avg_count_gap_tolerance,
         )
     return current
 
@@ -332,7 +353,7 @@ def _try_k_swap_neighborhood(
     k: int,
     feasible_fn,
     score_fn,
-    current_score: Tuple[float, float],
+    current_score: Tuple[int, float, float],
 ) -> bool:
     eps = 1e-9
     n = len(picks)
@@ -354,9 +375,14 @@ def _try_k_swap_neighborhood(
             if not feasible_fn(candidate):
                 return False
             cand_score = score_fn(candidate)
-            cand_gap, cand_obj = cand_score
-            current_gap, current_obj = current_score
-            is_better = cand_gap < current_gap - eps or (abs(cand_gap - current_gap) <= eps and cand_obj > current_obj + eps)
+            cand_in_band, cand_gap, cand_obj = cand_score
+            current_in_band, current_gap, current_obj = current_score
+            if cand_in_band != current_in_band:
+                is_better = cand_in_band > current_in_band
+            elif cand_in_band == 1:
+                is_better = cand_obj > current_obj + eps or (abs(cand_obj - current_obj) <= eps and cand_gap < current_gap - eps)
+            else:
+                is_better = cand_gap < current_gap - eps or (abs(cand_gap - current_gap) <= eps and cand_obj > current_obj + eps)
             if is_better:
                 picks[:] = candidate
                 return True
@@ -388,9 +414,9 @@ def _simulated_annealing(
 ) -> List[int]:
     eps = 1e-9
     current = picks[:]
-    current_gap, current_obj = score_fn(current)
+    current_in_band, current_gap, current_obj = score_fn(current)
     best = current[:]
-    best_gap, best_obj = current_gap, current_obj
+    best_in_band, best_gap, best_obj = current_in_band, current_gap, current_obj
     temperature = 0.5
 
     for step in range(max_steps):
@@ -412,17 +438,32 @@ def _simulated_annealing(
         if not changed or not feasible_fn(candidate):
             continue
 
-        cand_gap, cand_obj = score_fn(candidate)
+        cand_in_band, cand_gap, cand_obj = score_fn(candidate)
         delta = cand_obj - current_obj
-        if (
-            cand_gap < current_gap - eps
-            or (abs(cand_gap - current_gap) <= eps and (delta > 0 or random.random() < math.exp(delta / max(1e-6, temperature))))
-        ):
+        accept = False
+        if cand_in_band > current_in_band:
+            accept = True
+        elif cand_in_band < current_in_band:
+            accept = False
+        elif cand_in_band == 1:
+            accept = delta > 0 or random.random() < math.exp(delta / max(1e-6, temperature))
+        elif cand_gap < current_gap - eps:
+            accept = True
+        elif abs(cand_gap - current_gap) <= eps:
+            accept = delta > 0 or random.random() < math.exp(delta / max(1e-6, temperature))
+
+        if accept:
             current = candidate
+            current_in_band = cand_in_band
             current_gap = cand_gap
             current_obj = cand_obj
-            if cand_gap < best_gap - eps or (abs(cand_gap - best_gap) <= eps and cand_obj > best_obj + eps):
+            if (
+                cand_in_band > best_in_band
+                or (cand_in_band == best_in_band == 1 and (cand_obj > best_obj + eps or (abs(cand_obj - best_obj) <= eps and cand_gap < best_gap - eps)))
+                or (cand_in_band == best_in_band == 0 and (cand_gap < best_gap - eps or (abs(cand_gap - best_gap) <= eps and cand_obj > best_obj + eps)))
+            ):
                 best = candidate
+                best_in_band = cand_in_band
                 best_gap = cand_gap
                 best_obj = cand_obj
         temperature *= 0.985
@@ -477,10 +518,10 @@ def _targeted_top3_run_repair(
     if current_avg_count <= target_avg_count + 1e-9:
         return False
 
-    current_gap_obj = score_fn(picks)
+    current_score = score_fn(picks)
     current_gap = abs(current_avg_count - target_avg_count)
     best_candidate: Optional[List[int]] = None
-    best_score = current_gap_obj
+    best_score = current_score
     best_gap = current_gap
 
     for pos in range(len(sorted_idx) - 1):
@@ -505,13 +546,34 @@ def _targeted_top3_run_repair(
                 if candidate_gap > current_gap + 1e-9:
                     continue
                 cand_score = score_fn(candidate)
-                cand_obj = cand_score[1]
-                if candidate_gap < best_gap - 1e-9 or (abs(candidate_gap - best_gap) <= 1e-9 and cand_obj > best_score[1] + 1e-9):
+                cand_in_band, _, cand_obj = cand_score
+                best_in_band, _, best_obj = best_score
+                better = False
+                if cand_in_band != best_in_band:
+                    better = cand_in_band > best_in_band
+                elif cand_in_band == 1:
+                    better = cand_obj > best_obj + 1e-9 or (abs(cand_obj - best_obj) <= 1e-9 and candidate_gap < best_gap - 1e-9)
+                else:
+                    better = candidate_gap < best_gap - 1e-9 or (abs(candidate_gap - best_gap) <= 1e-9 and cand_obj > best_obj + 1e-9)
+                if better:
                     best_candidate = candidate
                     best_score = cand_score
                     best_gap = candidate_gap
 
-    if best_candidate is not None and (best_gap < current_gap - 1e-9 or best_score[1] > current_gap_obj[1] + 1e-9):
+    if best_candidate is not None:
+        curr_in_band, _, curr_obj = current_score
+        best_in_band, _, best_obj = best_score
+        improved = False
+        if best_in_band != curr_in_band:
+            improved = best_in_band > curr_in_band
+        elif best_in_band == 1:
+            improved = best_obj > curr_obj + 1e-9 or best_gap < current_gap - 1e-9
+        else:
+            improved = best_gap < current_gap - 1e-9 or best_obj > curr_obj + 1e-9
+    else:
+        improved = False
+
+    if best_candidate is not None and improved:
         picks[:] = best_candidate
         return True
     return False
@@ -534,12 +596,21 @@ def predict(next_path: str, model_path: str, out_path: str) -> None:
 
     hard_raw = model.get("hard_constraints", {})
     hard = {"top1": int(hard_raw.get("top1", 9)), "top2": int(hard_raw.get("top2", 5)), "top3": int(hard_raw.get("top3", 4)), "secos": int(hard_raw.get("secos", 12)), "triplos": int(hard_raw.get("triplos", 2))}
+    top3_avg_count_gap_tolerance = float(model.get("top3_avg_count_gap_tolerance", 0.30))
     soft_metric_weights = resolve_soft_metric_weights(model)
 
     logging.info("Restrições hard em uso: %s", hard)
+    logging.info("Tolerância do gap top3.avg_count em uso: %.6f", top3_avg_count_gap_tolerance)
     logging.info("Pesos soft por slot/métrica em uso: %s", soft_metric_weights)
     picks = build_prediction(rows, hard)
-    picks = improve_with_soft_constraints(rows, picks, model.get("targets", {}), hard, soft_metric_weights)
+    picks = improve_with_soft_constraints(
+        rows,
+        picks,
+        model.get("targets", {}),
+        hard,
+        soft_metric_weights,
+        top3_avg_count_gap_tolerance=top3_avg_count_gap_tolerance,
+    )
 
     out_rows = []
     sum_top = [0, 0, 0]

@@ -121,9 +121,14 @@ def compute_soft_metrics(rows: List[MatchRow], picks: List[int]) -> Dict[str, Di
     return result
 
 
-def soft_penalty(soft_metrics: Dict[str, Dict[str, float]], targets: Dict[str, Dict[str, float]]) -> float:
+def soft_penalty(
+    soft_metrics: Dict[str, Dict[str, float]],
+    targets: Dict[str, Dict[str, float]],
+    slot_weights: Dict[str, float],
+) -> float:
     penalty = 0.0
     for slot in TOP_SLOT_NAMES:
+        slot_weight = float(slot_weights.get(slot, 1.0))
         current = soft_metrics.get(slot, {})
         target = targets.get(slot, {})
         for metric in ["avg_length", "avg_count", "avg_position"]:
@@ -131,10 +136,10 @@ def soft_penalty(soft_metrics: Dict[str, Dict[str, float]], targets: Dict[str, D
             cv = float(current.get(metric, 0.0))
             std = float(target.get(f"{metric}_std", 0.0))
             if std > 1e-9:
-                penalty += abs(cv - tv) / std
+                penalty += slot_weight * (abs(cv - tv) / std)
             else:
                 scale = max(1.0, abs(tv))
-                penalty += abs(cv - tv) / scale
+                penalty += slot_weight * (abs(cv - tv) / scale)
     return penalty
 
 
@@ -150,7 +155,13 @@ def hard_counts_from_picks(picks: List[int]) -> Tuple[int, int, int, int, int]:
     return c1, c2, c3, secos, triplos
 
 
-def improve_with_soft_constraints(rows: List[MatchRow], picks: List[int], targets: Dict[str, Dict[str, float]], hard: Dict[str, int]) -> List[int]:
+def improve_with_soft_constraints(
+    rows: List[MatchRow],
+    picks: List[int],
+    targets: Dict[str, Dict[str, float]],
+    hard: Dict[str, int],
+    slot_weights: Dict[str, float],
+) -> List[int]:
     def base_score(local_picks: List[int]) -> float:
         return sum(option_probability(row, OPTIONS[pick][1]) for row, pick in zip(rows, local_picks))
 
@@ -159,7 +170,7 @@ def improve_with_soft_constraints(rows: List[MatchRow], picks: List[int], target
         return c1 == hard["top1"] and c2 == hard["top2"] and c3 == hard["top3"] and secos == hard["secos"] and triplos == hard["triplos"]
 
     def objective(local_picks: List[int], soft_weight: float) -> float:
-        return base_score(local_picks) - soft_weight * soft_penalty(compute_soft_metrics(rows, local_picks), targets)
+        return base_score(local_picks) - soft_weight * soft_penalty(compute_soft_metrics(rows, local_picks), targets, slot_weights)
 
     def local_search(seed_picks: List[int], soft_weight: float) -> List[int]:
         current = seed_picks[:]
@@ -299,10 +310,17 @@ def predict(next_path: str, model_path: str, out_path: str) -> None:
 
     hard_raw = model.get("hard_constraints", {})
     hard = {"top1": int(hard_raw.get("top1", 9)), "top2": int(hard_raw.get("top2", 5)), "top3": int(hard_raw.get("top3", 4)), "secos": int(hard_raw.get("secos", 12)), "triplos": int(hard_raw.get("triplos", 2))}
+    soft_weights_raw = model.get("soft_slot_weights", {})
+    soft_slot_weights = {
+        "top1": float(soft_weights_raw.get("top1", 1.0)),
+        "top2": float(soft_weights_raw.get("top2", 1.0)),
+        "top3": float(soft_weights_raw.get("top3", 1.15)),
+    }
 
     logging.info("Restrições hard em uso: %s", hard)
+    logging.info("Pesos soft por slot em uso: %s", soft_slot_weights)
     picks = build_prediction(rows, hard)
-    picks = improve_with_soft_constraints(rows, picks, model.get("targets", {}), hard)
+    picks = improve_with_soft_constraints(rows, picks, model.get("targets", {}), hard, soft_slot_weights)
 
     out_rows = []
     sum_top = [0, 0, 0]

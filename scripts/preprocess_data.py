@@ -1,5 +1,5 @@
 import argparse
-from statistics import mean
+from statistics import mean, pstdev
 from typing import Dict, List
 
 from scripts.common import (
@@ -33,6 +33,9 @@ def compute_targets(history: List[MatchRow]) -> Dict[str, Dict[str, float]]:
             "avg_length": mean(run_lengths) if run_lengths else 0.0,
             "avg_count": mean(run_counts) if run_counts else 0.0,
             "avg_position": mean(run_positions) if run_positions else 0.0,
+            "avg_length_std": pstdev(run_lengths) if run_lengths else 0.0,
+            "avg_count_std": pstdev(run_counts) if run_counts else 0.0,
+            "avg_position_std": pstdev(run_positions) if run_positions else 0.0,
         }
     return targets
 

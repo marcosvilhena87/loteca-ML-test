@@ -12,17 +12,26 @@
     "top1": {
       "avg_length": 2.1448931116389547,
       "avg_count": 3.65083135391924,
-      "avg_position": 6.61381631037213
+      "avg_position": 6.600254410408804,
+      "avg_length_std": 0.9327631843146066,
+      "avg_count_std": 0.9421159399153508,
+      "avg_position_std": 1.135094221565288
     },
     "top2": {
       "avg_length": 1.414885193982581,
       "avg_count": 2.821852731591449,
-      "avg_position": 6.701543942992874
+      "avg_position": 6.79265731629152,
+      "avg_length_std": 0.6294795604613652,
+      "avg_count_std": 1.1237439067068213,
+      "avg_position_std": 2.016222569915985
     },
     "top3": {
       "avg_length": 1.2326999208234362,
       "avg_count": 2.2612826603325415,
-      "avg_position": 5.994813935075218
+      "avg_position": 6.005593258681144,
+      "avg_length_std": 0.4591432000762873,
+      "avg_count_std": 1.0121106416701666,
+      "avg_position_std": 2.6328312671756744
     }
   },
   "hard_constraints": {

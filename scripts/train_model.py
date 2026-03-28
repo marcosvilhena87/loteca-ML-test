@@ -34,6 +34,7 @@ def train(history_path: str, model_path: str) -> Dict[str, object]:
             "top2": {"avg_length": 1.0, "avg_count": 1.0, "avg_position": 1.0},
             "top3": {"avg_length": 1.0, "avg_count": 1.35, "avg_position": 1.15},
         },
+        "top3_avg_count_gap_tolerance": 0.25,
     }
     dump_json(model_path, model)
     logging.info("Modelo treinado e salvo em %s", model_path)

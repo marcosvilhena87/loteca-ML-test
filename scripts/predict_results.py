@@ -588,7 +588,7 @@ def outcomes_from_slots(match: MatchRow, slots: Sequence[int]) -> str:
     return "".join(ordered)
 
 
-def predict(next_path: str, model_path: str, out_path: str) -> None:
+def predict(next_path: str, model_path: str, out_path: str, top3_gap_tolerance_override: Optional[float] = None) -> None:
     model = load_json(model_path)
     rows = [normalize_row(row) for row in read_csv_semicolon(next_path)]
     if not rows:
@@ -596,7 +596,11 @@ def predict(next_path: str, model_path: str, out_path: str) -> None:
 
     hard_raw = model.get("hard_constraints", {})
     hard = {"top1": int(hard_raw.get("top1", 9)), "top2": int(hard_raw.get("top2", 5)), "top3": int(hard_raw.get("top3", 4)), "secos": int(hard_raw.get("secos", 12)), "triplos": int(hard_raw.get("triplos", 2))}
-    top3_avg_count_gap_tolerance = float(model.get("top3_avg_count_gap_tolerance", 0.30))
+    top3_avg_count_gap_tolerance = float(
+        top3_gap_tolerance_override
+        if top3_gap_tolerance_override is not None
+        else model.get("top3_avg_count_gap_tolerance", 0.25)
+    )
     soft_metric_weights = resolve_soft_metric_weights(model)
 
     logging.info("Restrições hard em uso: %s", hard)
@@ -654,11 +658,67 @@ def predict(next_path: str, model_path: str, out_path: str) -> None:
     )
 
 
+def evaluate_tolerances(
+    rows: List[MatchRow],
+    initial_picks: List[int],
+    targets: Dict[str, Dict[str, float]],
+    hard: Dict[str, int],
+    metric_weights: Dict[str, Dict[str, float]],
+    tolerances: Sequence[float],
+) -> List[Dict[str, float]]:
+    results: List[Dict[str, float]] = []
+    for tolerance in tolerances:
+        improved = improve_with_soft_constraints(
+            rows,
+            initial_picks[:],
+            targets,
+            hard,
+            metric_weights,
+            top3_avg_count_gap_tolerance=tolerance,
+        )
+        soft_metrics = compute_soft_metrics(rows, improved)
+        top3_stats = soft_metrics.get("top3", {})
+        top3_target_avg_count = float(targets.get("top3", {}).get("avg_count", top3_stats.get("avg_count", 0.0)))
+        top3_gap = abs(float(top3_stats.get("avg_count", 0.0)) - top3_target_avg_count)
+        results.append(
+            {
+                "tolerance": tolerance,
+                "base_score": sum(option_probability(row, OPTIONS[pick][1]) for row, pick in zip(rows, improved)),
+                "soft_penalty": soft_penalty(soft_metrics, targets, metric_weights),
+                "top3_avg_count_gap": top3_gap,
+            }
+        )
+    return results
+
+
+def parse_tolerances(raw: str) -> List[float]:
+    tolerances: List[float] = []
+    for token in raw.split(","):
+        text = token.strip()
+        if not text:
+            continue
+        tolerances.append(float(text))
+    if not tolerances:
+        raise ValueError("Informe pelo menos uma tolerância em --tolerance-grid.")
+    return tolerances
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Gera palpites Loteca com restrições hard/soft")
     parser.add_argument("--next", default="data/proximo_concurso.csv")
     parser.add_argument("--model", default="models/model.json")
     parser.add_argument("--output", default="output/predictions.csv")
+    parser.add_argument(
+        "--top3-gap-tolerance",
+        type=float,
+        default=None,
+        help="Sobrescreve a tolerância do gap top3.avg_count definida no modelo (ex.: 0.25).",
+    )
+    parser.add_argument(
+        "--tolerance-grid",
+        default="",
+        help="Lista de tolerâncias separadas por vírgula para benchmark (ex.: 0.20,0.25,0.30,0.35).",
+    )
     parser.add_argument("--log-level", default="INFO")
     return parser.parse_args()
 
@@ -666,4 +726,21 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     setup_logging(level=getattr(logging, args.log_level.upper(), logging.INFO))
-    predict(args.next, args.model, args.output)
+    model = load_json(args.model)
+    rows = [normalize_row(row) for row in read_csv_semicolon(args.next)]
+    hard_raw = model.get("hard_constraints", {})
+    hard = {"top1": int(hard_raw.get("top1", 9)), "top2": int(hard_raw.get("top2", 5)), "top3": int(hard_raw.get("top3", 4)), "secos": int(hard_raw.get("secos", 12)), "triplos": int(hard_raw.get("triplos", 2))}
+    metric_weights = resolve_soft_metric_weights(model)
+    initial_picks = build_prediction(rows, hard)
+    if args.tolerance_grid.strip():
+        grid = parse_tolerances(args.tolerance_grid)
+        benchmark = evaluate_tolerances(rows, initial_picks, model.get("targets", {}), hard, metric_weights, grid)
+        for item in benchmark:
+            logging.info(
+                "Benchmark tolerância=%.2f | base_score=%.6f | soft_penalty=%.6f | gap_top3.avg_count=%.6f",
+                item["tolerance"],
+                item["base_score"],
+                item["soft_penalty"],
+                item["top3_avg_count_gap"],
+            )
+    predict(args.next, args.model, args.output, top3_gap_tolerance_override=args.top3_gap_tolerance)

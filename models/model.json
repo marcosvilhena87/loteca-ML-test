@@ -57,5 +57,6 @@
       "avg_count": 1.35,
       "avg_position": 1.15
     }
-  }
+  },
+  "top3_avg_count_gap_tolerance": 0.25
 }
